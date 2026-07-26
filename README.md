@@ -74,6 +74,10 @@ that same view, send the downloaded file back to a Claude Code session, and the 
      If a caregiver had more than one shift on the same day, the most urgent one wins the color
      (incomplete beats cancelled beats ongoing beats a plain completed total).
 
+   Hover over any cell with a shift in it to see a tooltip with the actual clock times (e.g.
+   "3:00 PM to 9:00 PM"), so you can double check the real punch times behind the decimal number
+   without opening `Shifts`.
+
 `Hours` is rebuilt from `Shifts` on every scan, so it always reflects everything scanned so far,
 across however many weeks you've scanned. If you edit anything in `Hours` by hand, it'll be
 overwritten on the next scan — `Shifts` is the source of truth.

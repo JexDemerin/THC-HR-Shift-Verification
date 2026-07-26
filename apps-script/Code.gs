@@ -12,6 +12,8 @@
 //   completed hours as a decimal, "ongoing" for in-progress shifts, 0 for
 //   incomplete (missing clock in/out), or the cancellation note for a
 //   cancelled shift. This is HR's working view — no separate report needed.
+//   Every cell with a shift also gets a hover note (Sheets cell note, not
+//   its content) showing the actual clock times, e.g. "3:00 PM to 9:00 PM".
 
 var SHEET_NAME = 'Shifts';
 var HOURS_SHEET_NAME = 'Hours';
@@ -168,6 +170,16 @@ function computeHours(timeIn, timeOut) {
   return Math.round((diffMinutes / 60) * 100) / 100;
 }
 
+// Plain-language version of a shift's clock times, e.g. "3:00 PM to 9:00
+// PM", used as a Sheets cell note (the little hover tooltip) so HR can see
+// the real punch times behind the computed decimal without opening Shifts.
+function describeShiftTimes(record) {
+  if (record.time_in && record.time_out) return record.time_in + ' to ' + record.time_out;
+  if (record.time_in) return 'Clocked in at ' + record.time_in + ' (no clock out recorded)';
+  if (record.time_out) return 'Clocked out at ' + record.time_out + ' (no clock in recorded)';
+  return null;
+}
+
 function formatDateHeader(isoDate) {
   var parts = isoDate.split('-');
   return parseInt(parts[1], 10) + '/' + parseInt(parts[2], 10);
@@ -246,7 +258,9 @@ function rebuildHoursPivot(ss) {
     dateSet[date] = true;
 
     var key = caregiver + '|' + date;
-    if (!cellMap[key]) cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [] };
+    if (!cellMap[key]) {
+      cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [], timeDetails: [] };
+    }
     var cell = cellMap[key];
     cell.hasData = true;
     cell.statuses[record.status] = true;
@@ -257,6 +271,9 @@ function rebuildHoursPivot(ss) {
     }
 
     if (record.note) cell.notes.push(record.note);
+
+    var timeDetail = describeShiftTimes(record);
+    if (timeDetail) cell.timeDetails.push(timeDetail);
   });
 
   var caregivers = Object.keys(caregiverSet).sort();
@@ -290,8 +307,13 @@ function rebuildHoursPivot(ss) {
   caregivers.forEach(function (caregiver, rIdx) {
     dates.forEach(function (date, cIdx) {
       var color = resolved[rIdx][cIdx].color;
+      var range = hoursSheet.getRange(rIdx + 3, cIdx + 2);
       if (color) {
-        hoursSheet.getRange(rIdx + 3, cIdx + 2).setBackground(color);
+        range.setBackground(color);
+      }
+      var cell = cellMap[caregiver + '|' + date];
+      if (cell && cell.timeDetails.length > 0) {
+        range.setNote(cell.timeDetails.join('\n'));
       }
     });
   });
