@@ -358,45 +358,81 @@ function buildTimesheetIndex(sheet) {
   });
 }
 
-// Writes one resolved cell (value/color/fontColor/note) into every
-// existing (row, column) location across all of the tab's blocks whose
-// header already has this exact date and whose caregiver rows already
-// include this exact caregiver. Returns a status string so the caller can
-// tally and report back what actually happened, since this otherwise fails
-// silently by design (a shift with nowhere to go yet is expected, not an
-// error) — 'written', 'no_date_match', or 'no_caregiver_match'.
-function writeResolvedCell(sheet, blocks, caregiverName, isoDate, resolved) {
+// Finds every (block index, row, column) location across the given blocks
+// whose header already has this exact date and whose caregiver rows
+// already include this exact caregiver — pure lookup, no sheet writes, so
+// callers can batch the actual writes per block instead of hitting the
+// sheet once per individual cell. Returns { matches, status }, where status
+// is 'written' (1+ matches), 'no_date_match', or 'no_caregiver_match' — the
+// two miss reasons this otherwise fails silently by design (a shift with
+// nowhere to go yet is expected, not an error).
+function findTimesheetMatches(blocks, caregiverName, isoDate) {
   var dateKey = formatDateHeader(isoDate);
   var nameKey = normalizeName(caregiverName);
-  var wrote = false;
+  var matches = [];
   var sawDate = false;
   var sawCaregiver = false;
 
-  blocks.forEach(function (block) {
+  blocks.forEach(function (block, blockIdx) {
     var cols = block.columnsByDate[dateKey];
     var row = block.nameMap[nameKey];
     if (cols) sawDate = true;
     if (row) sawCaregiver = true;
     if (!cols || !row) return;
-
     cols.forEach(function (col) {
-      var range = sheet.getRange(row, col);
-      range.setNumberFormat('@');
-      range.setValue(resolved.value);
-      range.setBackground(resolved.color || null);
-      range.setFontColor(resolved.fontColor || null);
-      if (resolved.note) {
-        range.setNote(resolved.note);
-      } else {
-        range.clearNote();
-      }
+      matches.push({ blockIdx: blockIdx, row: row, col: col });
     });
-    wrote = true;
   });
 
-  if (wrote) return 'written';
-  if (!sawDate) return 'no_date_match';
-  return 'no_caregiver_match';
+  var status = matches.length > 0 ? 'written' : sawDate ? 'no_caregiver_match' : 'no_date_match';
+  return { matches: matches, status: status };
+}
+
+// Applies every pending cell write in one batch per block — one bounding
+// rectangle covering all of that block's touched cells, read once and
+// written back once — rather than the 4-5 separate Apps Script service
+// calls per individual cell this used to take. For a scan touching a
+// couple hundred cells, that's the difference between a handful of calls
+// and enough round trips to risk timing out the next scan's lock wait.
+// pendingByBlockIndex: { blockIdx: [{ row, col, resolved }, ...] }.
+function applyPendingWrites(sheet, pendingByBlockIndex) {
+  Object.keys(pendingByBlockIndex).forEach(function (blockIdxKey) {
+    var pending = pendingByBlockIndex[blockIdxKey];
+    if (!pending || pending.length === 0) return;
+
+    var minRow = pending[0].row,
+      maxRow = pending[0].row,
+      minCol = pending[0].col,
+      maxCol = pending[0].col;
+    pending.forEach(function (p) {
+      if (p.row < minRow) minRow = p.row;
+      if (p.row > maxRow) maxRow = p.row;
+      if (p.col < minCol) minCol = p.col;
+      if (p.col > maxCol) maxCol = p.col;
+    });
+
+    var range = sheet.getRange(minRow, minCol, maxRow - minRow + 1, maxCol - minCol + 1);
+    range.setNumberFormat('@');
+
+    var values = range.getValues();
+    var backgrounds = range.getBackgrounds();
+    var fontColors = range.getFontColors();
+    var notes = range.getNotes();
+
+    pending.forEach(function (p) {
+      var r = p.row - minRow;
+      var c = p.col - minCol;
+      values[r][c] = p.resolved.value;
+      backgrounds[r][c] = p.resolved.color || '';
+      fontColors[r][c] = p.resolved.fontColor || '';
+      notes[r][c] = p.resolved.note || '';
+    });
+
+    range.setValues(values);
+    range.setBackgrounds(backgrounds);
+    range.setFontColors(fontColors);
+    range.setNotes(notes);
+  });
 }
 
 // Picks what a single caregiver/date cell shows, when that day may have had
@@ -496,21 +532,29 @@ function rebuildHoursPivot(ss) {
   var blocks = buildTimesheetIndex(timesheetSheet);
   summary.headerBlocksFound = blocks.length;
 
+  var pendingByBlockIndex = {}; // blockIdx -> [{ row, col, resolved }, ...]
+
   Object.keys(cellMap).forEach(function (key) {
     var entry = cellMap[key];
     var resolved = resolveCell(entry);
     resolved.note = entry.shiftDetails.length > 0 ? entry.shiftDetails.join('\n') : null;
     summary.cellsResolved++;
 
-    var status = writeResolvedCell(timesheetSheet, blocks, entry.caregiver, entry.date, resolved);
-    if (status === 'written') {
+    var found = findTimesheetMatches(blocks, entry.caregiver, entry.date);
+    if (found.status === 'written') {
       summary.written++;
+      found.matches.forEach(function (m) {
+        if (!pendingByBlockIndex[m.blockIdx]) pendingByBlockIndex[m.blockIdx] = [];
+        pendingByBlockIndex[m.blockIdx].push({ row: m.row, col: m.col, resolved: resolved });
+      });
     } else {
       var sample = entry.caregiver + ' @ ' + entry.date;
-      var bucket = status === 'no_date_match' ? summary.skippedNoDateMatch : summary.skippedNoCaregiverMatch;
+      var bucket = found.status === 'no_date_match' ? summary.skippedNoDateMatch : summary.skippedNoCaregiverMatch;
       if (bucket.length < MAX_PIVOT_SAMPLES) bucket.push(sample);
     }
   });
+
+  applyPendingWrites(timesheetSheet, pendingByBlockIndex);
 
   return summary;
 }

@@ -31,7 +31,7 @@ async function sendToSheet(webhookUrl, records) {
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(`Sheet responded with HTTP ${response.status}: ${text.slice(0, 300)}`);
+    throw new Error(`Sheet responded with HTTP ${response.status}: ${plainTextSnippet(text)}`);
   }
 
   // A non-JSON 200 (e.g. Apps Script's own "authorization required" or
@@ -41,6 +41,19 @@ async function sendToSheet(webhookUrl, records) {
   try {
     return JSON.parse(text);
   } catch (err) {
-    throw new Error(`Sheet response wasn't valid JSON: ${text.slice(0, 300)}`);
+    throw new Error(`Sheet response wasn't valid JSON: ${plainTextSnippet(text)}`);
   }
+}
+
+// Apps Script's own error pages are HTML with a big inline <style> block
+// before the actual message — a plain character-count slice of the raw
+// markup mostly just shows CSS. Stripping tags first means the same
+// snippet length actually shows the error text itself.
+function plainTextSnippet(html, maxLength = 500) {
+  const text = html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
