@@ -61,11 +61,14 @@ that same view, send the downloaded file back to a Claude Code session, and the 
    and click **Save**.
 7. Click **Scan Schedule**. Two kinds of tabs get created in the Sheet automatically:
    - `Shifts` — one row per shift (the raw detail: caregiver, client, date, times, status, note).
-   - `Hours - <Month> <Year>` (e.g. `Hours - July 2026`) — one tab per calendar month that has
-     any data, created the first time a shift from that month gets scanned. Caregiver names down
-     the side, every day of that month across the top (day 1 through the last day — the whole
-     month is laid out up front, not just days you've actually scanned yet, since a single scan
-     only covers about a week). A day with no shift at all shows `-`. Otherwise the cell shows
+   - `Hours <start> - <end>` (e.g. `Hours Jan 4 - Jan 31, 2026`) — one tab per 28-day payroll
+     period that has any data, created the first time a shift from that period gets scanned.
+     Periods are fixed 28-day blocks (four Sunday-Saturday weeks) counted from a confirmed anchor
+     date (Jan 4, 2026) pulled from the real payroll spreadsheet — see `PERIOD_ANCHOR` at the top
+     of `Code.gs` if a period boundary ever needs correcting. Caregiver names down the side, the
+     whole period laid out across the top as four 7-day weeks separated by a blank column (day 1
+     through the last day of the period, not just days you've actually scanned yet, since a single
+     scan only covers about a week). A day with no shift at all shows `-`. Otherwise the cell shows
      whatever's relevant for that day's status, colored to match:
      - **green** — completed, cell shows the computed decimal hours
      - **red** — incomplete (missing clock in/out), cell shows 0
@@ -90,11 +93,11 @@ that same view, send the downloaded file back to a Claude Code session, and the 
    S. Palapati (6:15 PM - 9:00 PM: 2.75)
    ```
 
-Every `Hours - <Month> <Year>` tab is rebuilt from `Shifts` on every scan, so it always reflects
-everything scanned so far for that month. If you edit anything in one of those tabs by hand,
+Every `Hours <start> - <end>` tab is rebuilt from `Shifts` on every scan, so it always reflects
+everything scanned so far for that period. If you edit anything in one of those tabs by hand,
 it'll be overwritten on the next scan — `Shifts` is the source of truth. A scanned week that
-straddles two months (e.g. July 28 – August 3) correctly splits across both months' tabs, since
-each shift is placed by its own date, not by which week it was scanned in.
+straddles two periods correctly splits across both tabs, since each shift is placed by its own
+date, not by which week it was scanned in.
 
 The extension is pre-authorized to talk to `script.google.com` (where every Apps Script Web App
 URL lives), so saving the URL doesn't trigger any extra Chrome permission prompt. If you switch

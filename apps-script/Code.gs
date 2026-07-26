@@ -6,17 +6,23 @@
 //
 // Writes:
 // - "Shifts": one row per shift, the raw scanned detail (audit trail).
-// - One "Hours - <Month> <Year>" tab per calendar month that has any data,
-//   e.g. "Hours - July 2026" — built/rebuilt from "Shifts" on every scan.
-//   Caregiver names down the side, every day of that month across the top
-//   (not just days that have been scanned — a scan only ever covers about a
-//   week, so the full month is laid out up front and fills in as more weeks
-//   get scanned). Each cell is colored by that day's shift status and shows
-//   whatever's relevant for that status (see resolveCell below): completed
-//   hours as a decimal, "ongoing" for in-progress shifts, 0 for incomplete
-//   (missing clock in/out), or the cancellation note for a cancelled shift.
-//   A day with no shift at all shows "-". This is HR's working view — no
-//   separate report needed.
+// - One "Hours <start> - <end>" tab per 28-day payroll period that has any
+//   data, e.g. "Hours Jan 4 - Jan 31, 2026" — matches the real payroll
+//   spreadsheet's "Caregivers TimeSheets Record" layout: periods are fixed
+//   28-day blocks (4 Sunday-Saturday weeks) counted from PERIOD_ANCHOR
+//   below, laid out as 4 weekly 7-column blocks separated by a blank
+//   column, with one more blank column right after the caregiver-name
+//   column. Built/rebuilt from "Shifts" on every scan. A scan only ever
+//   covers about a week, so the full period is laid out up front (days
+//   not scanned yet just show "-") and a scanned week that straddles two
+//   periods correctly splits across both tabs, since each shift is placed
+//   by its own date rather than by whatever week was scanned.
+//
+//   Each cell is colored by that day's shift status and shows whatever's
+//   relevant for that status (see resolveCell below): completed hours as a
+//   decimal, "ongoing" for in-progress shifts, 0 for incomplete (missing
+//   clock in/out), or the cancellation note for a cancelled shift. This is
+//   HR's working view — no separate report needed.
 //
 //   Every cell with a shift also gets a hover note (Sheets cell note, not
 //   its content) breaking down each client visit that day, e.g.:
@@ -27,20 +33,14 @@
 
 var SHEET_NAME = 'Shifts';
 
-var MONTH_NAMES = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December',
-];
+// A confirmed period start pulled from the real spreadsheet (Sunday, Jan 4
+// 2026). Every other period is calculated as a fixed 28-day block counted
+// forward/backward from this one date — if a period boundary in the output
+// ever looks wrong, this assumption is the first thing to check.
+var PERIOD_ANCHOR = '2026-01-04';
+var PERIOD_LENGTH_DAYS = 28;
+
+var MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 var HEADERS = [
   'caregiver_name',
@@ -255,27 +255,62 @@ function pad2(n) {
   return n < 10 ? '0' + n : String(n);
 }
 
-// "2026-07" -> "2026-07-05" for day 5. Matches the zero-padded shift_date
-// format scan-script.js already writes, so these line up as cellMap keys.
-function isoDateForDay(year, month, day) {
-  return year + '-' + pad2(month) + '-' + pad2(day);
+function isoToDate(isoDate) {
+  var parts = isoDate.split('-').map(Number);
+  return new Date(parts[0], parts[1] - 1, parts[2]);
 }
 
-// Day 0 of "next month" is the last day of "this month" — the standard JS
-// trick for days-in-month, month here is 1-indexed to match monthKey.
-function daysInMonth(year, month) {
-  return new Date(year, month, 0).getDate();
+function dateToIso(d) {
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
 }
 
-function monthKeyFromIso(isoDate) {
-  return isoDate.slice(0, 7); // "YYYY-MM"
+function addDays(isoDate, days) {
+  var d = isoToDate(isoDate);
+  d.setDate(d.getDate() + days);
+  return dateToIso(d);
 }
 
-function monthSheetName(monthKey) {
-  var parts = monthKey.split('-');
-  var year = parseInt(parts[0], 10);
-  var month = parseInt(parts[1], 10);
-  return 'Hours - ' + MONTH_NAMES[month - 1] + ' ' + year;
+function daysBetween(isoFrom, isoTo) {
+  return Math.round((isoToDate(isoTo) - isoToDate(isoFrom)) / (24 * 60 * 60 * 1000));
+}
+
+// Which 28-day period a date falls in, expressed as that period's own start
+// date (also used as the period's unique key, since periods never overlap).
+function periodStartForDate(isoDate) {
+  var diff = daysBetween(PERIOD_ANCHOR, isoDate);
+  var periodIndex = Math.floor(diff / PERIOD_LENGTH_DAYS);
+  return addDays(PERIOD_ANCHOR, periodIndex * PERIOD_LENGTH_DAYS);
+}
+
+function monthDayLabel(isoDate) {
+  var parts = isoDate.split('-').map(Number);
+  return MONTH_ABBR[parts[1] - 1] + ' ' + parts[2];
+}
+
+// "2026-01-04" -> "Hours Jan 4 - Jan 31, 2026" (both years shown if the
+// period happens to cross a year boundary).
+function periodSheetName(periodStart) {
+  var periodEnd = addDays(periodStart, PERIOD_LENGTH_DAYS - 1);
+  var startYear = parseInt(periodStart.slice(0, 4), 10);
+  var endYear = parseInt(periodEnd.slice(0, 4), 10);
+  var startLabel = monthDayLabel(periodStart) + (startYear !== endYear ? ', ' + startYear : '');
+  var endLabel = monthDayLabel(periodEnd) + ', ' + endYear;
+  return 'Hours ' + startLabel + ' - ' + endLabel;
+}
+
+// The period's column layout: a blank spacer right after the name column,
+// then 4 Sunday-Saturday weeks of 7 date columns each, separated by one
+// blank column between weeks (matching the real spreadsheet's layout).
+// Each entry is either {date: isoDate} or {blank: true}.
+function periodColumns(periodStart) {
+  var cols = [{ blank: true }];
+  for (var week = 0; week < 4; week++) {
+    for (var day = 0; day < 7; day++) {
+      cols.push({ date: addDays(periodStart, week * 7 + day) });
+    }
+    if (week < 3) cols.push({ blank: true });
+  }
+  return cols;
 }
 
 // Picks what a single caregiver/date cell shows, when that day may have had
@@ -316,11 +351,12 @@ function resolveCell(cell) {
   return cellResult(cell.hoursSum, 'completed');
 }
 
-// Groups every row currently in "Shifts" by calendar month (a single scan
-// only ever covers about a week, and that week can straddle two different
-// months' tables — bucketing by each record's own shift_date, rather than
-// by whatever week was scanned, is what keeps that split correct), then
-// rebuilds each month's "Hours - <Month> <Year>" tab from scratch.
+// Groups every row currently in "Shifts" by 28-day payroll period (a single
+// scan only ever covers about a week, and that week can straddle two
+// different periods' tables — bucketing by each record's own shift_date,
+// rather than by whatever week was scanned, is what keeps that split
+// correct), then rebuilds each period's "Hours <start> - <end>" tab from
+// scratch.
 function rebuildHoursPivot(ss) {
   var shiftsSheet = ss.getSheetByName(SHEET_NAME);
   if (!shiftsSheet) return;
@@ -329,7 +365,7 @@ function rebuildHoursPivot(ss) {
 
   var data = shiftsSheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
 
-  var months = {}; // "YYYY-MM" -> { caregiverSet, cellMap }
+  var periods = {}; // period start ISO date -> { caregiverSet, cellMap }
 
   data.forEach(function (row) {
     var record = rowToRecord(row);
@@ -337,16 +373,16 @@ function rebuildHoursPivot(ss) {
     var date = record.shift_date;
     if (!caregiver || !date) return;
 
-    var monthKey = monthKeyFromIso(date);
-    if (!months[monthKey]) months[monthKey] = { caregiverSet: {}, cellMap: {} };
-    var month = months[monthKey];
-    month.caregiverSet[caregiver] = true;
+    var periodStart = periodStartForDate(date);
+    if (!periods[periodStart]) periods[periodStart] = { caregiverSet: {}, cellMap: {} };
+    var period = periods[periodStart];
+    period.caregiverSet[caregiver] = true;
 
     var key = caregiver + '|' + date;
-    if (!month.cellMap[key]) {
-      month.cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [], shiftDetails: [] };
+    if (!period.cellMap[key]) {
+      period.cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [], shiftDetails: [] };
     }
-    var cell = month.cellMap[key];
+    var cell = period.cellMap[key];
     cell.hasData = true;
     cell.statuses[record.status] = true;
 
@@ -361,23 +397,19 @@ function rebuildHoursPivot(ss) {
     if (detail) cell.shiftDetails.push(detail);
   });
 
-  Object.keys(months).forEach(function (monthKey) {
-    writeMonthTable(ss, monthKey, months[monthKey]);
+  Object.keys(periods).forEach(function (periodStart) {
+    writePeriodTable(ss, periodStart, periods[periodStart]);
   });
 }
 
-// Writes one month's full "Hours - <Month> <Year>" tab: every day of that
-// month across the top (day 1 through the last day, whether or not it's
-// been scanned yet — unscanned days just show "-"), every caregiver seen
-// in that month down the side. Gets/creates the tab by name and always
-// rewrites it wholesale, same as the old single-tab version did.
-function writeMonthTable(ss, monthKey, monthData) {
-  var parts = monthKey.split('-');
-  var year = parseInt(parts[0], 10);
-  var month = parseInt(parts[1], 10);
-  var numDays = daysInMonth(year, month);
-
-  var sheetName = monthSheetName(monthKey);
+// Writes one payroll period's full "Hours <start> - <end>" tab: a blank
+// spacer column, then 4 Sunday-Saturday weeks of 7 date columns each
+// separated by a blank column — every day of the period laid out whether
+// or not it's been scanned yet (unscanned days just show "-"), every
+// caregiver seen in that period down the side. Gets/creates the tab by
+// name and always rewrites it wholesale.
+function writePeriodTable(ss, periodStart, periodData) {
+  var sheetName = periodSheetName(periodStart);
   var sheet = ss.getSheetByName(sheetName);
   if (!sheet) {
     sheet = ss.insertSheet(sheetName);
@@ -385,14 +417,20 @@ function writeMonthTable(ss, monthKey, monthData) {
     sheet.clear();
   }
 
-  var dates = [];
-  for (var d = 1; d <= numDays; d++) dates.push(isoDateForDay(year, month, d));
-
-  var caregivers = Object.keys(monthData.caregiverSet).sort();
+  var columns = periodColumns(periodStart); // [{date} | {blank}], in sheet-column order after the name column
+  var caregivers = Object.keys(periodData.caregiverSet).sort();
   if (caregivers.length === 0) return;
 
-  var dateHeaderRow = [''].concat(dates.map(formatDateHeader));
-  var weekdayHeaderRow = [''].concat(dates.map(getWeekdayName));
+  var dateHeaderRow = [''].concat(
+    columns.map(function (c) {
+      return c.blank ? '' : formatDateHeader(c.date);
+    })
+  );
+  var weekdayHeaderRow = [''].concat(
+    columns.map(function (c) {
+      return c.blank ? '' : getWeekdayName(c.date);
+    })
+  );
   var headerRange = sheet.getRange(1, 1, 2, dateHeaderRow.length);
   headerRange.setNumberFormat('@'); // keep "7/25" as text, not an auto-converted date
   sheet.getRange(1, 1, 1, dateHeaderRow.length).setValues([dateHeaderRow]);
@@ -401,22 +439,23 @@ function writeMonthTable(ss, monthKey, monthData) {
 
   sheet.getRange(3, 1, caregivers.length, 1).setNumberFormat('@');
   var resolved = caregivers.map(function (caregiver) {
-    return dates.map(function (date) {
-      return resolveCell(monthData.cellMap[caregiver + '|' + date]);
+    return columns.map(function (c) {
+      return c.blank ? null : resolveCell(periodData.cellMap[caregiver + '|' + c.date]);
     });
   });
 
   var outputRows = caregivers.map(function (caregiver, rIdx) {
     return [caregiver].concat(
       resolved[rIdx].map(function (r) {
-        return r.value;
+        return r ? r.value : '';
       })
     );
   });
   sheet.getRange(3, 1, outputRows.length, dateHeaderRow.length).setValues(outputRows);
 
   caregivers.forEach(function (caregiver, rIdx) {
-    dates.forEach(function (date, cIdx) {
+    columns.forEach(function (c, cIdx) {
+      if (c.blank) return;
       var r = resolved[rIdx][cIdx];
       var range = sheet.getRange(rIdx + 3, cIdx + 2);
       if (r.color) {
@@ -425,7 +464,7 @@ function writeMonthTable(ss, monthKey, monthData) {
       if (r.fontColor) {
         range.setFontColor(r.fontColor);
       }
-      var cell = monthData.cellMap[caregiver + '|' + date];
+      var cell = periodData.cellMap[caregiver + '|' + c.date];
       if (cell && cell.shiftDetails.length > 0) {
         range.setNote(cell.shiftDetails.join('\n'));
       }
