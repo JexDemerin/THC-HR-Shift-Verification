@@ -166,21 +166,20 @@ async function saveWebhookUrl() {
     return;
   }
 
-  let origin;
   try {
-    origin = new URL(url).origin + '/*';
+    new URL(url);
   } catch (err) {
     setStatus('That does not look like a valid URL.');
     return;
   }
 
+  if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) {
+    setStatus('This should be an Apps Script Web App URL (starts with https://script.google.com/).');
+    return;
+  }
+
   saveWebhookBtn.disabled = true;
   try {
-    const granted = await chrome.permissions.request({ origins: [origin] });
-    if (!granted) {
-      setStatus('Permission denied — cannot send data to that URL without access.');
-      return;
-    }
     await chrome.storage.local.set({ webhookUrl: url });
     setStatus('Google Sheet URL saved.');
   } catch (err) {

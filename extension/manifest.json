@@ -15,7 +15,8 @@
     "downloads",
     "storage"
   ],
-  "optional_host_permissions": [
-    "<all_urls>"
+  "host_permissions": [
+    "https://script.google.com/*",
+    "https://script.googleusercontent.com/*"
   ]
 }

@@ -58,10 +58,14 @@ that same view, send the downloaded file back to a Claude Code session, and the 
    Homecare").
 5. Click **Deploy**, authorize it when prompted, and copy the Web App URL it gives you.
 6. In the extension's popup, open **Settings**, paste the URL into "Google Sheet Web App URL",
-   and click **Save**. Chrome will ask you to confirm access to that URL — approve it (this is
-   what lets the extension send data there).
+   and click **Save**.
 7. Click **Scan Schedule** — a `Shifts` tab will be created in the Sheet automatically on first
    send, with the right column headers.
+
+The extension is pre-authorized to talk to `script.google.com` (where every Apps Script Web App
+URL lives), so saving the URL doesn't trigger any extra Chrome permission prompt. If you switch
+to the n8n webhook alternative instead, add its domain to `host_permissions` in
+`extension/manifest.json` and reload the extension, since n8n won't live on `script.google.com`.
 
 Re-scanning the same shift updates its existing row instead of creating a duplicate. Rows are
 color-coded by status directly in the Sheet (red-ish for incomplete, yellow for unparsed) so
