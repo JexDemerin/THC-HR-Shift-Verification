@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "THC WellSky Shift Scanner",
+  "version": "0.1.0",
+  "description": "Phase 0: capture raw WellSky schedule markup on demand so we can build a real shift parser from real HTML.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "downloads"
+  ]
+}

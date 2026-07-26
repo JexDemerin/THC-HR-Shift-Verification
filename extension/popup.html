@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>THC WellSky Shift Scanner</title>
+    <style>
+      body {
+        width: 320px;
+        font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+        margin: 0;
+        padding: 12px;
+        color: #1a1a1a;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 2px;
+      }
+      .subtitle {
+        font-size: 11px;
+        color: #666;
+        margin: 0 0 12px;
+      }
+      button {
+        width: 100%;
+        padding: 8px 10px;
+        font-size: 13px;
+        border-radius: 6px;
+        border: 1px solid #ccc;
+        background: #f5f5f5;
+        cursor: pointer;
+        margin-bottom: 8px;
+      }
+      button:hover:not(:disabled) {
+        background: #ececec;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+      button.primary {
+        background: #1565c0;
+        border-color: #1565c0;
+        color: #fff;
+      }
+      button.primary:hover:not(:disabled) {
+        background: #0f4c96;
+      }
+      .phase-tag {
+        font-size: 10px;
+        color: #999;
+        display: block;
+        margin-top: -4px;
+        margin-bottom: 8px;
+      }
+      #status {
+        font-size: 12px;
+        color: #333;
+        min-height: 16px;
+        margin: 8px 0;
+        word-break: break-word;
+      }
+      #log {
+        border-top: 1px solid #e0e0e0;
+        margin-top: 8px;
+        padding-top: 8px;
+        max-height: 160px;
+        overflow-y: auto;
+      }
+      .log-entry {
+        font-size: 11px;
+        color: #555;
+        padding: 4px 0;
+        border-bottom: 1px dashed #eee;
+      }
+      .log-entry:last-child {
+        border-bottom: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>WellSky Shift Scanner</h1>
+    <p class="subtitle">Together Homecare — payroll follow-up tool</p>
+
+    <button id="exportBtn" class="primary">Export Raw HTML</button>
+    <span class="phase-tag">Phase 0 — DOM discovery tool</span>
+
+    <button id="scanBtn" disabled title="Coming in Phase 1, once real WellSky markup has been captured and the parser is built">
+      Scan Schedule
+    </button>
+    <span class="phase-tag">Phase 1+ — not yet implemented</span>
+
+    <div id="status">Ready.</div>
+    <div id="log"></div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
