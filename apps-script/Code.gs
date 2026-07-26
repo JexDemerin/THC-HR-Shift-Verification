@@ -6,23 +6,28 @@
 //
 // Writes:
 // - "Shifts": one row per shift, the raw scanned detail (audit trail).
-// - One "Hours <start> - <end>" tab per 28-day payroll period that has any
-//   data, e.g. "Hours Jan 4 - Jan 31, 2026" — matches the real payroll
-//   spreadsheet's "Caregivers TimeSheets Record" layout: periods are fixed
-//   28-day blocks (4 Sunday-Saturday weeks) counted from PERIOD_ANCHOR
-//   below, laid out as 4 weekly 7-column blocks separated by a blank
-//   column, with one more blank column right after the caregiver-name
-//   column. Built/rebuilt from "Shifts" on every scan. A scan only ever
-//   covers about a week, so the full period is laid out up front (days
-//   not scanned yet just show "-") and a scanned week that straddles two
-//   periods correctly splits across both tabs, since each shift is placed
-//   by its own date rather than by whatever week was scanned.
+// - TIMESHEETS_SHEET_NAME below (the real, human-maintained payroll tab,
+//   e.g. "2026 Caregivers TimeSheets Record") — never created, only ever
+//   written into. That tab is laid out as a series of date-header blocks
+//   stacked vertically down the sheet (a new block roughly every 28 days,
+//   each with its own row of "M/DD" date headers and a caregiver-name row
+//   below it), extended by hand over time rather than generated. Rather
+//   than compute date math and guess at that structure, every scan:
+//     1. Scans the tab once for rows that look like date-header rows
+//        (findDateHeaderRows) and indexes each block's date->column and
+//        caregiver-name->row lookups (buildTimesheetIndex).
+//     2. For each (caregiver, date) with shift data, looks up the real
+//        header cell(s) that already match that exact date and caregiver,
+//        and writes only that single cell — value, color, and hover note.
+//   A shift whose date has no matching header yet (e.g. today, before
+//   payroll has extended the table that far) is skipped rather than
+//   fabricating a new block — this tab's structure is HR's to maintain,
+//   the script only fills in cells that already exist for it to find.
 //
-//   Each cell is colored by that day's shift status and shows whatever's
-//   relevant for that status (see resolveCell below): completed hours as a
-//   decimal, "ongoing" for in-progress shifts, 0 for incomplete (missing
-//   clock in/out), or the cancellation note for a cancelled shift. This is
-//   HR's working view — no separate report needed.
+//   A cell's value/color is picked by that day's shift status (see
+//   resolveCell): completed hours as a decimal, "ongoing" for in-progress
+//   shifts, 0 for incomplete (missing clock in/out), or the cancellation
+//   note for a cancelled shift.
 //
 //   Every cell with a shift also gets a hover note (Sheets cell note, not
 //   its content) breaking down each client visit that day, e.g.:
@@ -33,14 +38,12 @@
 
 var SHEET_NAME = 'Shifts';
 
-// A confirmed period start pulled from the real spreadsheet (Sunday, Jan 4
-// 2026). Every other period is calculated as a fixed 28-day block counted
-// forward/backward from this one date — if a period boundary in the output
-// ever looks wrong, this assumption is the first thing to check.
-var PERIOD_ANCHOR = '2026-01-04';
-var PERIOD_LENGTH_DAYS = 28;
-
-var MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// The real payroll tab name — confirm this matches your sheet exactly
+// (Sheets truncates long tab labels in the UI, e.g. to "...TimeSheets
+// Reco", but the underlying name is the full string below). This tab is
+// never created or cleared by the script — if it's missing, nothing gets
+// written and rebuildHoursPivot silently no-ops.
+var TIMESHEETS_SHEET_NAME = '2026 Caregivers TimeSheets Record';
 
 var HEADERS = [
   'caregiver_name',
@@ -78,8 +81,6 @@ var STATUS_FONT_COLORS = {
 // in this order too, in case more than one applies (rare, but shifts can
 // stack on one day).
 var CANCELLED_STATUSES = ['cancelled_by_caregiver', 'cancelled_by_office', 'cancelled_by_client'];
-
-var WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
@@ -240,77 +241,119 @@ function describeShiftDetail(record) {
   return label + ' (no times recorded)';
 }
 
-function formatDateHeader(isoDate) {
-  var parts = isoDate.split('-');
-  return parseInt(parts[1], 10) + '/' + parseInt(parts[2], 10);
-}
-
-function getWeekdayName(isoDate) {
-  var parts = isoDate.split('-').map(Number);
-  var d = new Date(parts[0], parts[1] - 1, parts[2]);
-  return WEEKDAY_NAMES[d.getDay()];
-}
-
 function pad2(n) {
   return n < 10 ? '0' + n : String(n);
 }
 
-function isoToDate(isoDate) {
-  var parts = isoDate.split('-').map(Number);
-  return new Date(parts[0], parts[1] - 1, parts[2]);
+// "2026-01-04" -> "1/04" — matches the real sheet's header format exactly:
+// month with no leading zero, day always 2 digits.
+function formatDateHeader(isoDate) {
+  var parts = isoDate.split('-');
+  return parseInt(parts[1], 10) + '/' + pad2(parseInt(parts[2], 10));
 }
 
-function dateToIso(d) {
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+// Matches a date-header cell like "1/04" or "10/25" — not a full calendar
+// date, so this only ever appears in the header row of one of the tab's
+// date blocks.
+var DATE_HEADER_PATTERN = /^\d{1,2}\/\d{2}$/;
+
+// A header row needs at least this many cells matching DATE_HEADER_PATTERN
+// to count as a real date-header row, rather than a coincidental match.
+var MIN_DATE_HEADER_CELLS = 5;
+
+// "Albulasi, Wesam" and "Wesam Albulasi" both normalize to the same key, so
+// caregiver names can be matched regardless of which order the sheet (or
+// the Shifts data) happens to use — the real tab mixes both formats.
+function normalizeName(name) {
+  if (!name) return '';
+  var commaParts = String(name).split(',');
+  var canonical = commaParts.length === 2 ? commaParts[1] + ' ' + commaParts[0] : commaParts[0];
+  return canonical.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function addDays(isoDate, days) {
-  var d = isoToDate(isoDate);
-  d.setDate(d.getDate() + days);
-  return dateToIso(d);
-}
+// Scans the whole timesheets tab once for rows that look like date-header
+// rows (the row of "1/04", "1/05", ... cells at the top of each of the
+// tab's stacked date blocks). Returns one entry per header row found:
+// { row: <1-based row>, columnsByDate: { "1/04": [colIndex, ...], ... } }
+// — an array of columns per date since a block's stale/duplicate week can
+// repeat the same date in more than one column.
+function findDateHeaderRows(sheet) {
+  var lastRow = sheet.getLastRow();
+  var lastCol = sheet.getLastColumn();
+  if (lastRow === 0 || lastCol === 0) return [];
+  var values = sheet.getRange(1, 1, lastRow, lastCol).getValues();
 
-function daysBetween(isoFrom, isoTo) {
-  return Math.round((isoToDate(isoTo) - isoToDate(isoFrom)) / (24 * 60 * 60 * 1000));
-}
-
-// Which 28-day period a date falls in, expressed as that period's own start
-// date (also used as the period's unique key, since periods never overlap).
-function periodStartForDate(isoDate) {
-  var diff = daysBetween(PERIOD_ANCHOR, isoDate);
-  var periodIndex = Math.floor(diff / PERIOD_LENGTH_DAYS);
-  return addDays(PERIOD_ANCHOR, periodIndex * PERIOD_LENGTH_DAYS);
-}
-
-function monthDayLabel(isoDate) {
-  var parts = isoDate.split('-').map(Number);
-  return MONTH_ABBR[parts[1] - 1] + ' ' + parts[2];
-}
-
-// "2026-01-04" -> "Hours Jan 4 - Jan 31, 2026" (both years shown if the
-// period happens to cross a year boundary).
-function periodSheetName(periodStart) {
-  var periodEnd = addDays(periodStart, PERIOD_LENGTH_DAYS - 1);
-  var startYear = parseInt(periodStart.slice(0, 4), 10);
-  var endYear = parseInt(periodEnd.slice(0, 4), 10);
-  var startLabel = monthDayLabel(periodStart) + (startYear !== endYear ? ', ' + startYear : '');
-  var endLabel = monthDayLabel(periodEnd) + ', ' + endYear;
-  return 'Hours ' + startLabel + ' - ' + endLabel;
-}
-
-// The period's column layout: a blank spacer right after the name column,
-// then 4 Sunday-Saturday weeks of 7 date columns each, separated by one
-// blank column between weeks (matching the real spreadsheet's layout).
-// Each entry is either {date: isoDate} or {blank: true}.
-function periodColumns(periodStart) {
-  var cols = [{ blank: true }];
-  for (var week = 0; week < 4; week++) {
-    for (var day = 0; day < 7; day++) {
-      cols.push({ date: addDays(periodStart, week * 7 + day) });
+  var headerRows = [];
+  values.forEach(function (rowValues, idx) {
+    var columnsByDate = {};
+    var matches = 0;
+    rowValues.forEach(function (cell, colIdx) {
+      var text = String(cell).trim();
+      if (DATE_HEADER_PATTERN.test(text)) {
+        matches++;
+        if (!columnsByDate[text]) columnsByDate[text] = [];
+        columnsByDate[text].push(colIdx + 1); // 1-based column
+      }
+    });
+    if (matches >= MIN_DATE_HEADER_CELLS) {
+      headerRows.push({ row: idx + 1, columnsByDate: columnsByDate });
     }
-    if (week < 3) cols.push({ blank: true });
-  }
-  return cols;
+  });
+  return headerRows;
+}
+
+// A block's caregiver rows start 2 rows below its date-header row (skipping
+// the weekday sub-header directly below the dates) and run until the row
+// right before the next date-header row (or the sheet's last row, for the
+// final block).
+function buildTimesheetIndex(sheet) {
+  var headerRows = findDateHeaderRows(sheet);
+  var lastRow = sheet.getLastRow();
+
+  return headerRows.map(function (header, i) {
+    var startRow = header.row + 2;
+    var nextHeaderRow = headerRows[i + 1] ? headerRows[i + 1].row : null;
+    var endRow = nextHeaderRow ? nextHeaderRow - 1 : lastRow;
+
+    var nameMap = {};
+    if (endRow >= startRow) {
+      var names = sheet.getRange(startRow, 1, endRow - startRow + 1, 1).getValues();
+      names.forEach(function (n, idx) {
+        var key = normalizeName(n[0]);
+        if (key) nameMap[key] = startRow + idx;
+      });
+    }
+
+    return { columnsByDate: header.columnsByDate, nameMap: nameMap };
+  });
+}
+
+// Writes one resolved cell (value/color/fontColor/note) into every
+// existing (row, column) location across all of the tab's blocks whose
+// header already has this exact date and whose caregiver rows already
+// include this exact caregiver — does nothing if neither exists yet.
+function writeResolvedCell(sheet, blocks, caregiverName, isoDate, resolved) {
+  var dateKey = formatDateHeader(isoDate);
+  var nameKey = normalizeName(caregiverName);
+
+  blocks.forEach(function (block) {
+    var cols = block.columnsByDate[dateKey];
+    var row = block.nameMap[nameKey];
+    if (!cols || !row) return;
+
+    cols.forEach(function (col) {
+      var range = sheet.getRange(row, col);
+      range.setNumberFormat('@');
+      range.setValue(resolved.value);
+      range.setBackground(resolved.color || null);
+      range.setFontColor(resolved.fontColor || null);
+      if (resolved.note) {
+        range.setNote(resolved.note);
+      } else {
+        range.clearNote();
+      }
+    });
+  });
 }
 
 // Picks what a single caregiver/date cell shows, when that day may have had
@@ -351,21 +394,24 @@ function resolveCell(cell) {
   return cellResult(cell.hoursSum, 'completed');
 }
 
-// Groups every row currently in "Shifts" by 28-day payroll period (a single
-// scan only ever covers about a week, and that week can straddle two
-// different periods' tables — bucketing by each record's own shift_date,
-// rather than by whatever week was scanned, is what keeps that split
-// correct), then rebuilds each period's "Hours <start> - <end>" tab from
-// scratch.
+// Aggregates every row currently in "Shifts" by (caregiver, date) — a
+// caregiver can have more than one shift the same day (different clients),
+// and each one only ever has one cell to land in — then writes each
+// aggregated cell into the real timesheets tab, wherever a matching date
+// header + caregiver row already exists for it. Never clears or rebuilds
+// anything; a shift with nowhere to go yet is silently skipped.
 function rebuildHoursPivot(ss) {
   var shiftsSheet = ss.getSheetByName(SHEET_NAME);
   if (!shiftsSheet) return;
   var lastRow = shiftsSheet.getLastRow();
   if (lastRow < 2) return;
 
+  var timesheetSheet = ss.getSheetByName(TIMESHEETS_SHEET_NAME);
+  if (!timesheetSheet) return;
+
   var data = shiftsSheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
 
-  var periods = {}; // period start ISO date -> { caregiverSet, cellMap }
+  var cellMap = {}; // "caregiver|date" -> { caregiver, date, hoursSum, hasData, statuses, notes, shiftDetails }
 
   data.forEach(function (row) {
     var record = rowToRecord(row);
@@ -373,16 +419,11 @@ function rebuildHoursPivot(ss) {
     var date = record.shift_date;
     if (!caregiver || !date) return;
 
-    var periodStart = periodStartForDate(date);
-    if (!periods[periodStart]) periods[periodStart] = { caregiverSet: {}, cellMap: {} };
-    var period = periods[periodStart];
-    period.caregiverSet[caregiver] = true;
-
     var key = caregiver + '|' + date;
-    if (!period.cellMap[key]) {
-      period.cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [], shiftDetails: [] };
+    if (!cellMap[key]) {
+      cellMap[key] = { caregiver: caregiver, date: date, hoursSum: 0, hasData: false, statuses: {}, notes: [], shiftDetails: [] };
     }
-    var cell = period.cellMap[key];
+    var cell = cellMap[key];
     cell.hasData = true;
     cell.statuses[record.status] = true;
 
@@ -397,82 +438,14 @@ function rebuildHoursPivot(ss) {
     if (detail) cell.shiftDetails.push(detail);
   });
 
-  Object.keys(periods).forEach(function (periodStart) {
-    writePeriodTable(ss, periodStart, periods[periodStart]);
+  var blocks = buildTimesheetIndex(timesheetSheet);
+
+  Object.keys(cellMap).forEach(function (key) {
+    var entry = cellMap[key];
+    var resolved = resolveCell(entry);
+    resolved.note = entry.shiftDetails.length > 0 ? entry.shiftDetails.join('\n') : null;
+    writeResolvedCell(timesheetSheet, blocks, entry.caregiver, entry.date, resolved);
   });
-}
-
-// Writes one payroll period's full "Hours <start> - <end>" tab: a blank
-// spacer column, then 4 Sunday-Saturday weeks of 7 date columns each
-// separated by a blank column — every day of the period laid out whether
-// or not it's been scanned yet (unscanned days just show "-"), every
-// caregiver seen in that period down the side. Gets/creates the tab by
-// name and always rewrites it wholesale.
-function writePeriodTable(ss, periodStart, periodData) {
-  var sheetName = periodSheetName(periodStart);
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) {
-    sheet = ss.insertSheet(sheetName);
-  } else {
-    sheet.clear();
-  }
-
-  var columns = periodColumns(periodStart); // [{date} | {blank}], in sheet-column order after the name column
-  var caregivers = Object.keys(periodData.caregiverSet).sort();
-  if (caregivers.length === 0) return;
-
-  var dateHeaderRow = [''].concat(
-    columns.map(function (c) {
-      return c.blank ? '' : formatDateHeader(c.date);
-    })
-  );
-  var weekdayHeaderRow = [''].concat(
-    columns.map(function (c) {
-      return c.blank ? '' : getWeekdayName(c.date);
-    })
-  );
-  var headerRange = sheet.getRange(1, 1, 2, dateHeaderRow.length);
-  headerRange.setNumberFormat('@'); // keep "7/25" as text, not an auto-converted date
-  sheet.getRange(1, 1, 1, dateHeaderRow.length).setValues([dateHeaderRow]);
-  sheet.getRange(2, 1, 1, weekdayHeaderRow.length).setValues([weekdayHeaderRow]);
-  headerRange.setFontWeight('bold');
-
-  sheet.getRange(3, 1, caregivers.length, 1).setNumberFormat('@');
-  var resolved = caregivers.map(function (caregiver) {
-    return columns.map(function (c) {
-      return c.blank ? null : resolveCell(periodData.cellMap[caregiver + '|' + c.date]);
-    });
-  });
-
-  var outputRows = caregivers.map(function (caregiver, rIdx) {
-    return [caregiver].concat(
-      resolved[rIdx].map(function (r) {
-        return r ? r.value : '';
-      })
-    );
-  });
-  sheet.getRange(3, 1, outputRows.length, dateHeaderRow.length).setValues(outputRows);
-
-  caregivers.forEach(function (caregiver, rIdx) {
-    columns.forEach(function (c, cIdx) {
-      if (c.blank) return;
-      var r = resolved[rIdx][cIdx];
-      var range = sheet.getRange(rIdx + 3, cIdx + 2);
-      if (r.color) {
-        range.setBackground(r.color);
-      }
-      if (r.fontColor) {
-        range.setFontColor(r.fontColor);
-      }
-      var cell = periodData.cellMap[caregiver + '|' + c.date];
-      if (cell && cell.shiftDetails.length > 0) {
-        range.setNote(cell.shiftDetails.join('\n'));
-      }
-    });
-  });
-
-  sheet.setFrozenRows(2);
-  sheet.setFrozenColumns(1);
 }
 
 function jsonResponse(obj) {

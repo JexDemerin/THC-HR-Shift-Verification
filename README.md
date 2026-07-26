@@ -59,17 +59,30 @@ that same view, send the downloaded file back to a Claude Code session, and the 
 5. Click **Deploy**, authorize it when prompted, and copy the Web App URL it gives you.
 6. In the extension's popup, open **Settings**, paste the URL into "Google Sheet Web App URL",
    and click **Save**.
-7. Click **Scan Schedule**. Two kinds of tabs get created in the Sheet automatically:
+7. Before your first real scan, open `apps-script/Code.gs` and check `TIMESHEETS_SHEET_NAME`
+   matches your actual tab name exactly (Sheets truncates long tab labels in its UI, so double
+   check the full name via the tab's rename field, not just what's visible).
+8. Click **Scan Schedule**. Every scan writes to:
    - `Shifts` — one row per shift (the raw detail: caregiver, client, date, times, status, note).
-   - `Hours <start> - <end>` (e.g. `Hours Jan 4 - Jan 31, 2026`) — one tab per 28-day payroll
-     period that has any data, created the first time a shift from that period gets scanned.
-     Periods are fixed 28-day blocks (four Sunday-Saturday weeks) counted from a confirmed anchor
-     date (Jan 4, 2026) pulled from the real payroll spreadsheet — see `PERIOD_ANCHOR` at the top
-     of `Code.gs` if a period boundary ever needs correcting. Caregiver names down the side, the
-     whole period laid out across the top as four 7-day weeks separated by a blank column (day 1
-     through the last day of the period, not just days you've actually scanned yet, since a single
-     scan only covers about a week). A day with no shift at all shows `-`. Otherwise the cell shows
-     whatever's relevant for that day's status, colored to match:
+     Created automatically if missing — this is the only tab the script ever creates.
+   - `TIMESHEETS_SHEET_NAME` (your real, human-maintained payroll tab, e.g.
+     `2026 Caregivers TimeSheets Record`) — **never created and never cleared**. This tab is laid
+     out as a series of date-header blocks stacked vertically down the sheet (a new block roughly
+     every 28 days, each with its own row of dates like `1/04`, `1/05`, ... and a caregiver-name
+     row below it), extended by hand over time as payroll staff maintain it. On every scan, the
+     script:
+     1. Scans the tab once for rows that look like date headers, and indexes each block's
+        date → column and caregiver name → row lookups (caregiver names are matched regardless of
+        `"Last, First"` vs. `"First Last"` format, since the real tab mixes both).
+     2. For each caregiver/date that has shift data, writes into whichever existing cell(s) already
+        match that exact date and caregiver — nothing else on the tab is touched.
+
+     A shift dated after the tab's been extended (e.g. scanning today's schedule before payroll
+     has added this week's columns yet) has nowhere to go and is silently skipped — the script
+     fills in cells that already exist, it never builds new ones. Re-scan once the tab's been
+     extended and that shift will land normally.
+
+     Each cell written shows whatever's relevant for that day's status, colored to match:
      - **green** — completed, cell shows the computed decimal hours
      - **red** — incomplete (missing clock in/out), cell shows 0
      - **yellow** — ongoing (in progress), cell says "ongoing"
@@ -93,11 +106,10 @@ that same view, send the downloaded file back to a Claude Code session, and the 
    S. Palapati (6:15 PM - 9:00 PM: 2.75)
    ```
 
-Every `Hours <start> - <end>` tab is rebuilt from `Shifts` on every scan, so it always reflects
-everything scanned so far for that period. If you edit anything in one of those tabs by hand,
-it'll be overwritten on the next scan — `Shifts` is the source of truth. A scanned week that
-straddles two periods correctly splits across both tabs, since each shift is placed by its own
-date, not by which week it was scanned in.
+Every scan re-aggregates all of `Shifts` and re-writes the matching cells in the timesheets tab,
+so it always reflects everything scanned so far — `Shifts` is the source of truth for anything the
+script has written. Anything else already on the timesheets tab (rows for caregivers not yet
+matched, dates not yet scanned, other sections of the sheet) is left exactly as-is.
 
 The extension is pre-authorized to talk to `script.google.com` (where every Apps Script Web App
 URL lives), so saving the URL doesn't trigger any extra Chrome permission prompt. If you switch
