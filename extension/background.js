@@ -28,9 +28,19 @@ async function sendToSheet(webhookUrl, records) {
     body: JSON.stringify(records),
   });
 
+  const text = await response.text();
+
   if (!response.ok) {
-    throw new Error(`Sheet responded with HTTP ${response.status}`);
+    throw new Error(`Sheet responded with HTTP ${response.status}: ${text.slice(0, 300)}`);
   }
 
-  return response.json().catch(() => ({}));
+  // A non-JSON 200 (e.g. Apps Script's own "authorization required" or
+  // uncaught-exception HTML page) used to get silently swallowed into {},
+  // which is how a real failure turned into a content-free "unknown error"
+  // upstream — surface the actual body instead.
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(`Sheet response wasn't valid JSON: ${text.slice(0, 300)}`);
+  }
 }

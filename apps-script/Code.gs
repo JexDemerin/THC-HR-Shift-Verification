@@ -84,7 +84,16 @@ var CANCELLED_STATUSES = ['cancelled_by_caregiver', 'cancelled_by_office', 'canc
 
 function doPost(e) {
   var lock = LockService.getScriptLock();
-  lock.waitLock(30000);
+  try {
+    lock.waitLock(30000);
+  } catch (err) {
+    // Outside the main try/catch on purpose: if waitLock itself throws (a
+    // concurrent scan still holding the lock) and this isn't caught here,
+    // Apps Script returns an uncaught-exception HTML page instead of JSON,
+    // which the extension can't parse into a useful error message.
+    return jsonResponse({ ok: false, error: 'Could not acquire script lock (another scan may still be running): ' + describeError(err) });
+  }
+
   try {
     var payload = JSON.parse(e.postData.contents);
     var records = Array.isArray(payload) ? payload : payload.records || [];
@@ -94,10 +103,18 @@ function doPost(e) {
     var pivotSummary = rebuildHoursPivot(ss);
     return jsonResponse({ ok: true, count: records.length, pivotSummary: pivotSummary });
   } catch (err) {
-    return jsonResponse({ ok: false, error: err.message });
+    return jsonResponse({ ok: false, error: describeError(err) });
   } finally {
     lock.releaseLock();
   }
+}
+
+// err.message is usually present, but a thrown non-Error value (a plain
+// string, or certain Apps Script service errors) can leave it undefined —
+// falling back to String(err) means the caller never sees a blank/"unknown"
+// error with no way to tell what actually happened.
+function describeError(err) {
+  return (err && err.message) || String(err);
 }
 
 function doGet() {

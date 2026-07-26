@@ -144,7 +144,10 @@ async function scanSchedule() {
       addLogEntry('Sent to Google Sheet successfully.');
       logPivotSummary(sheetResult.pivotSummary);
     } else {
-      const errorMessage = (sheetResult && sheetResult.error) || (response && response.error) || 'unknown error';
+      const errorMessage =
+        (sheetResult && sheetResult.error) ||
+        (response && response.error) ||
+        'unknown error — check the Apps Script project\'s Executions log (clock icon on the left) for the actual failure';
       setStatus(parts.join(' — ') + ` — send failed: ${errorMessage}`);
       addLogEntry(`Send to sheet failed: ${errorMessage}`);
     }
