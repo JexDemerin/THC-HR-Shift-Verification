@@ -4,19 +4,43 @@
 // Script). Deploy as a Web App and paste the resulting URL into the Chrome
 // extension's Settings. See ../README.md for full deployment steps.
 //
-// Writes two tabs:
+// Writes:
 // - "Shifts": one row per shift, the raw scanned detail (audit trail).
-// - "Hours": a pivot built from "Shifts" — caregiver names down the side,
-//   dates across the top. Each cell is colored by that day's shift status
-//   and shows whatever's relevant for that status (see resolveCell below):
-//   completed hours as a decimal, "ongoing" for in-progress shifts, 0 for
-//   incomplete (missing clock in/out), or the cancellation note for a
-//   cancelled shift. This is HR's working view — no separate report needed.
+// - One "Hours - <Month> <Year>" tab per calendar month that has any data,
+//   e.g. "Hours - July 2026" — built/rebuilt from "Shifts" on every scan.
+//   Caregiver names down the side, every day of that month across the top
+//   (not just days that have been scanned — a scan only ever covers about a
+//   week, so the full month is laid out up front and fills in as more weeks
+//   get scanned). Each cell is colored by that day's shift status and shows
+//   whatever's relevant for that status (see resolveCell below): completed
+//   hours as a decimal, "ongoing" for in-progress shifts, 0 for incomplete
+//   (missing clock in/out), or the cancellation note for a cancelled shift.
+//   A day with no shift at all shows "-". This is HR's working view — no
+//   separate report needed.
+//
 //   Every cell with a shift also gets a hover note (Sheets cell note, not
-//   its content) showing the actual clock times, e.g. "3:00 PM to 9:00 PM".
+//   its content) breaking down each client visit that day, e.g.:
+//     A. Palapati (3:00 PM - 6:00 PM: 3)
+//     S. Palapati (6:15 PM - 9:00 PM: 2.75)
+//   — since a caregiver can work more than one client in a day, but the
+//   cell itself is always just that caregiver's one summed total for the day.
 
 var SHEET_NAME = 'Shifts';
-var HOURS_SHEET_NAME = 'Hours';
+
+var MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
 
 var HEADERS = [
   'caregiver_name',
@@ -193,14 +217,27 @@ function computeHours(timeIn, timeOut) {
   return roundToQuarterHour(diffMinutes);
 }
 
-// Plain-language version of a shift's clock times, e.g. "3:00 PM to 9:00
-// PM", used as a Sheets cell note (the little hover tooltip) so HR can see
-// the real punch times behind the computed decimal without opening Shifts.
-function describeShiftTimes(record) {
-  if (record.time_in && record.time_out) return record.time_in + ' to ' + record.time_out;
-  if (record.time_in) return 'Clocked in at ' + record.time_in + ' (no clock out recorded)';
-  if (record.time_out) return 'Clocked out at ' + record.time_out + ' (no clock in recorded)';
-  return null;
+// "Aaron Palapati" -> "A. Palapati" — first-name initial + last name(s), so
+// a caregiver's multiple clients fit on one line each in the hover note.
+function abbreviateClientName(name) {
+  if (!name) return 'Unknown client';
+  var parts = String(name).trim().split(/\s+/);
+  if (parts.length === 1) return parts[0];
+  return parts[0].charAt(0).toUpperCase() + '. ' + parts.slice(1).join(' ');
+}
+
+// One line of a cell's hover note, e.g. "A. Palapati (3:00 PM - 6:00 PM: 3)"
+// — used so a caregiver who worked more than one client in a day gets each
+// visit broken out, even though the cell itself only shows the day's total.
+function describeShiftDetail(record) {
+  var label = abbreviateClientName(record.client_name);
+  if (record.time_in && record.time_out) {
+    var hours = computeHours(record.time_in, record.time_out);
+    return label + ' (' + record.time_in + ' - ' + record.time_out + ': ' + (hours === null ? '?' : hours) + ')';
+  }
+  if (record.time_in) return label + ' (Clocked in ' + record.time_in + ', no clock out recorded)';
+  if (record.time_out) return label + ' (Clocked out ' + record.time_out + ', no clock in recorded)';
+  return label + ' (no times recorded)';
 }
 
 function formatDateHeader(isoDate) {
@@ -212,6 +249,33 @@ function getWeekdayName(isoDate) {
   var parts = isoDate.split('-').map(Number);
   var d = new Date(parts[0], parts[1] - 1, parts[2]);
   return WEEKDAY_NAMES[d.getDay()];
+}
+
+function pad2(n) {
+  return n < 10 ? '0' + n : String(n);
+}
+
+// "2026-07" -> "2026-07-05" for day 5. Matches the zero-padded shift_date
+// format scan-script.js already writes, so these line up as cellMap keys.
+function isoDateForDay(year, month, day) {
+  return year + '-' + pad2(month) + '-' + pad2(day);
+}
+
+// Day 0 of "next month" is the last day of "this month" — the standard JS
+// trick for days-in-month, month here is 1-indexed to match monthKey.
+function daysInMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
+function monthKeyFromIso(isoDate) {
+  return isoDate.slice(0, 7); // "YYYY-MM"
+}
+
+function monthSheetName(monthKey) {
+  var parts = monthKey.split('-');
+  var year = parseInt(parts[0], 10);
+  var month = parseInt(parts[1], 10);
+  return 'Hours - ' + MONTH_NAMES[month - 1] + ' ' + year;
 }
 
 // Picks what a single caregiver/date cell shows, when that day may have had
@@ -252,28 +316,20 @@ function resolveCell(cell) {
   return cellResult(cell.hoursSum, 'completed');
 }
 
-// Rebuilds the "Hours" tab from scratch out of every row currently in
-// "Shifts": one row per caregiver, one column per date seen so far. See
-// resolveCell for what each cell shows/is colored based on that day's
-// status(es).
+// Groups every row currently in "Shifts" by calendar month (a single scan
+// only ever covers about a week, and that week can straddle two different
+// months' tables — bucketing by each record's own shift_date, rather than
+// by whatever week was scanned, is what keeps that split correct), then
+// rebuilds each month's "Hours - <Month> <Year>" tab from scratch.
 function rebuildHoursPivot(ss) {
   var shiftsSheet = ss.getSheetByName(SHEET_NAME);
   if (!shiftsSheet) return;
   var lastRow = shiftsSheet.getLastRow();
-
-  var hoursSheet = ss.getSheetByName(HOURS_SHEET_NAME);
-  if (!hoursSheet) {
-    hoursSheet = ss.insertSheet(HOURS_SHEET_NAME);
-  } else {
-    hoursSheet.clear();
-  }
   if (lastRow < 2) return;
 
   var data = shiftsSheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
 
-  var caregiverSet = {};
-  var dateSet = {};
-  var cellMap = {};
+  var months = {}; // "YYYY-MM" -> { caregiverSet, cellMap }
 
   data.forEach(function (row) {
     var record = rowToRecord(row);
@@ -281,14 +337,16 @@ function rebuildHoursPivot(ss) {
     var date = record.shift_date;
     if (!caregiver || !date) return;
 
-    caregiverSet[caregiver] = true;
-    dateSet[date] = true;
+    var monthKey = monthKeyFromIso(date);
+    if (!months[monthKey]) months[monthKey] = { caregiverSet: {}, cellMap: {} };
+    var month = months[monthKey];
+    month.caregiverSet[caregiver] = true;
 
     var key = caregiver + '|' + date;
-    if (!cellMap[key]) {
-      cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [], timeDetails: [] };
+    if (!month.cellMap[key]) {
+      month.cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [], shiftDetails: [] };
     }
-    var cell = cellMap[key];
+    var cell = month.cellMap[key];
     cell.hasData = true;
     cell.statuses[record.status] = true;
 
@@ -299,26 +357,52 @@ function rebuildHoursPivot(ss) {
 
     if (record.note) cell.notes.push(record.note);
 
-    var timeDetail = describeShiftTimes(record);
-    if (timeDetail) cell.timeDetails.push(timeDetail);
+    var detail = describeShiftDetail(record);
+    if (detail) cell.shiftDetails.push(detail);
   });
 
-  var caregivers = Object.keys(caregiverSet).sort();
-  var dates = Object.keys(dateSet).sort();
-  if (caregivers.length === 0 || dates.length === 0) return;
+  Object.keys(months).forEach(function (monthKey) {
+    writeMonthTable(ss, monthKey, months[monthKey]);
+  });
+}
+
+// Writes one month's full "Hours - <Month> <Year>" tab: every day of that
+// month across the top (day 1 through the last day, whether or not it's
+// been scanned yet — unscanned days just show "-"), every caregiver seen
+// in that month down the side. Gets/creates the tab by name and always
+// rewrites it wholesale, same as the old single-tab version did.
+function writeMonthTable(ss, monthKey, monthData) {
+  var parts = monthKey.split('-');
+  var year = parseInt(parts[0], 10);
+  var month = parseInt(parts[1], 10);
+  var numDays = daysInMonth(year, month);
+
+  var sheetName = monthSheetName(monthKey);
+  var sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+  } else {
+    sheet.clear();
+  }
+
+  var dates = [];
+  for (var d = 1; d <= numDays; d++) dates.push(isoDateForDay(year, month, d));
+
+  var caregivers = Object.keys(monthData.caregiverSet).sort();
+  if (caregivers.length === 0) return;
 
   var dateHeaderRow = [''].concat(dates.map(formatDateHeader));
   var weekdayHeaderRow = [''].concat(dates.map(getWeekdayName));
-  var headerRange = hoursSheet.getRange(1, 1, 2, dateHeaderRow.length);
+  var headerRange = sheet.getRange(1, 1, 2, dateHeaderRow.length);
   headerRange.setNumberFormat('@'); // keep "7/25" as text, not an auto-converted date
-  hoursSheet.getRange(1, 1, 1, dateHeaderRow.length).setValues([dateHeaderRow]);
-  hoursSheet.getRange(2, 1, 1, weekdayHeaderRow.length).setValues([weekdayHeaderRow]);
+  sheet.getRange(1, 1, 1, dateHeaderRow.length).setValues([dateHeaderRow]);
+  sheet.getRange(2, 1, 1, weekdayHeaderRow.length).setValues([weekdayHeaderRow]);
   headerRange.setFontWeight('bold');
 
-  hoursSheet.getRange(3, 1, caregivers.length, 1).setNumberFormat('@');
+  sheet.getRange(3, 1, caregivers.length, 1).setNumberFormat('@');
   var resolved = caregivers.map(function (caregiver) {
     return dates.map(function (date) {
-      return resolveCell(cellMap[caregiver + '|' + date]);
+      return resolveCell(monthData.cellMap[caregiver + '|' + date]);
     });
   });
 
@@ -329,27 +413,27 @@ function rebuildHoursPivot(ss) {
       })
     );
   });
-  hoursSheet.getRange(3, 1, outputRows.length, dateHeaderRow.length).setValues(outputRows);
+  sheet.getRange(3, 1, outputRows.length, dateHeaderRow.length).setValues(outputRows);
 
   caregivers.forEach(function (caregiver, rIdx) {
     dates.forEach(function (date, cIdx) {
       var r = resolved[rIdx][cIdx];
-      var range = hoursSheet.getRange(rIdx + 3, cIdx + 2);
+      var range = sheet.getRange(rIdx + 3, cIdx + 2);
       if (r.color) {
         range.setBackground(r.color);
       }
       if (r.fontColor) {
         range.setFontColor(r.fontColor);
       }
-      var cell = cellMap[caregiver + '|' + date];
-      if (cell && cell.timeDetails.length > 0) {
-        range.setNote(cell.timeDetails.join('\n'));
+      var cell = monthData.cellMap[caregiver + '|' + date];
+      if (cell && cell.shiftDetails.length > 0) {
+        range.setNote(cell.shiftDetails.join('\n'));
       }
     });
   });
 
-  hoursSheet.setFrozenRows(2);
-  hoursSheet.setFrozenColumns(1);
+  sheet.setFrozenRows(2);
+  sheet.setFrozenColumns(1);
 }
 
 function jsonResponse(obj) {

@@ -59,10 +59,14 @@ that same view, send the downloaded file back to a Claude Code session, and the 
 5. Click **Deploy**, authorize it when prompted, and copy the Web App URL it gives you.
 6. In the extension's popup, open **Settings**, paste the URL into "Google Sheet Web App URL",
    and click **Save**.
-7. Click **Scan Schedule** — two tabs get created in the Sheet automatically on first send:
+7. Click **Scan Schedule**. Two kinds of tabs get created in the Sheet automatically:
    - `Shifts` — one row per shift (the raw detail: caregiver, client, date, times, status, note).
-   - `Hours` — caregiver names down the side, dates across the top. A cell with no shift at all
-     shows `-`. Otherwise it shows whatever's relevant for that day's status, colored to match:
+   - `Hours - <Month> <Year>` (e.g. `Hours - July 2026`) — one tab per calendar month that has
+     any data, created the first time a shift from that month gets scanned. Caregiver names down
+     the side, every day of that month across the top (day 1 through the last day — the whole
+     month is laid out up front, not just days you've actually scanned yet, since a single scan
+     only covers about a week). A day with no shift at all shows `-`. Otherwise the cell shows
+     whatever's relevant for that day's status, colored to match:
      - **green** — completed, cell shows the computed decimal hours
      - **red** — incomplete (missing clock in/out), cell shows 0
      - **yellow** — ongoing (in progress), cell says "ongoing"
@@ -78,13 +82,19 @@ that same view, send the downloaded file back to a Claude Code session, and the 
    leftover minutes round down to `:00`, 8-22 → `:15`, 23-37 → `:30`, 38-52 → `:45`, 53-60 round up
    to the next full hour (e.g. 2h17m → 2.25).
 
-   Hover over any cell with a shift in it to see a tooltip with the actual clock times (e.g.
-   "3:00 PM to 9:00 PM"), so you can double check the real punch times behind the decimal number
-   without opening `Shifts`.
+   Hover over any cell with a shift in it to see a note breaking down each client visit that day
+   (a caregiver can work more than one client in a day, even though the cell itself is always
+   just that day's summed total), e.g.:
+   ```
+   A. Palapati (3:00 PM - 6:00 PM: 3)
+   S. Palapati (6:15 PM - 9:00 PM: 2.75)
+   ```
 
-`Hours` is rebuilt from `Shifts` on every scan, so it always reflects everything scanned so far,
-across however many weeks you've scanned. If you edit anything in `Hours` by hand, it'll be
-overwritten on the next scan — `Shifts` is the source of truth.
+Every `Hours - <Month> <Year>` tab is rebuilt from `Shifts` on every scan, so it always reflects
+everything scanned so far for that month. If you edit anything in one of those tabs by hand,
+it'll be overwritten on the next scan — `Shifts` is the source of truth. A scanned week that
+straddles two months (e.g. July 28 – August 3) correctly splits across both months' tabs, since
+each shift is placed by its own date, not by which week it was scanned in.
 
 The extension is pre-authorized to talk to `script.google.com` (where every Apps Script Web App
 URL lives), so saving the URL doesn't trigger any extra Chrome permission prompt. If you switch
