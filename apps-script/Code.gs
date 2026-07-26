@@ -34,12 +34,18 @@ var HEADERS = [
 var STATUS_COLORS = {
   completed: '#d4edda', // green — real hours computed
   incomplete: '#f8d7da', // red — missing clock in/out
-  upcoming: '#d1ecf1', // blue — scheduled, hasn't happened yet
+  upcoming: '#1c4587', // dark blue — scheduled, hasn't happened yet
   ongoing: '#fff9b0', // yellow — in progress
   unparsed: '#fff3cd', // unrecognized status token, needs a look
   cancelled_by_caregiver: '#ffe0b2', // orange
   cancelled_by_office: '#ffb74d', // darker orange
-  cancelled_by_client: '#81d4fa', // sky blue
+  cancelled_by_client: '#81d4fa', // sky blue — cancelled by client/family
+};
+
+// Dark backgrounds need white text to stay readable; anything not listed
+// here keeps the sheet's default (black) text.
+var STATUS_FONT_COLORS = {
+  upcoming: '#ffffff',
 };
 
 // Priority order used to pick ONE color/value for a cell when a caregiver
@@ -147,6 +153,7 @@ function rowToRecord(row) {
 function applyStatusFormatting(sheet, rowNum, numCols, status) {
   var range = sheet.getRange(rowNum, 1, 1, numCols);
   range.setBackground(STATUS_COLORS[status] || null);
+  range.setFontColor(STATUS_FONT_COLORS[status] || null);
 }
 
 // time_in/time_out are stored as 12-hour strings like "8:41 AM". Converts
@@ -161,13 +168,29 @@ function parseClockString(str) {
   return hour * 60 + parseInt(m[2], 10);
 }
 
+// Payroll's official quarter-hour rounding rule (nearest-quarter, not
+// round-up): minutes past the hour —
+//   0-7 → :00, 8-22 → :15, 23-37 → :30, 38-52 → :45, 53-60 → next full hour.
+// E.g. 2h17m → 2.25 (17 falls in the 8-22 bucket).
+function roundToQuarterHour(totalMinutes) {
+  var wholeHours = Math.floor(totalMinutes / 60);
+  var remainder = totalMinutes % 60;
+  var fraction;
+  if (remainder <= 7) fraction = 0;
+  else if (remainder <= 22) fraction = 0.25;
+  else if (remainder <= 37) fraction = 0.5;
+  else if (remainder <= 52) fraction = 0.75;
+  else fraction = 1;
+  return wholeHours + fraction;
+}
+
 function computeHours(timeIn, timeOut) {
   var start = parseClockString(timeIn);
   var end = parseClockString(timeOut);
   if (start === null || end === null) return null;
   var diffMinutes = end - start;
   if (diffMinutes < 0) diffMinutes += 24 * 60; // shift crosses midnight
-  return Math.round((diffMinutes / 60) * 100) / 100;
+  return roundToQuarterHour(diffMinutes);
 }
 
 // Plain-language version of a shift's clock times, e.g. "3:00 PM to 9:00
@@ -196,33 +219,37 @@ function getWeekdayName(isoDate) {
 // attention wins the color and the displayed value:
 //   incomplete  > cancelled (whichever reason)  > ongoing  > unparsed
 //   > upcoming  > completed (fall-through: just the computed hours)
+function cellResult(value, status) {
+  return { value: value, color: STATUS_COLORS[status], fontColor: STATUS_FONT_COLORS[status] || null };
+}
+
 function resolveCell(cell) {
-  if (!cell || !cell.hasData) return { value: '', color: null };
+  if (!cell || !cell.hasData) return { value: '-', color: null, fontColor: null };
 
   if (cell.statuses.incomplete) {
-    return { value: cell.hoursSum, color: STATUS_COLORS.incomplete };
+    return cellResult(cell.hoursSum, 'incomplete');
   }
 
   for (var i = 0; i < CANCELLED_STATUSES.length; i++) {
     var s = CANCELLED_STATUSES[i];
     if (cell.statuses[s]) {
-      return { value: cell.notes.join('; '), color: STATUS_COLORS[s] };
+      return cellResult(cell.notes.join('; '), s);
     }
   }
 
   if (cell.statuses.ongoing) {
-    return { value: 'ongoing', color: STATUS_COLORS.ongoing };
+    return cellResult('ongoing', 'ongoing');
   }
 
   if (cell.statuses.unparsed) {
-    return { value: '', color: STATUS_COLORS.unparsed };
+    return cellResult('', 'unparsed');
   }
 
   if (cell.statuses.upcoming) {
-    return { value: '', color: STATUS_COLORS.upcoming };
+    return cellResult('', 'upcoming');
   }
 
-  return { value: cell.hoursSum, color: STATUS_COLORS.completed };
+  return cellResult(cell.hoursSum, 'completed');
 }
 
 // Rebuilds the "Hours" tab from scratch out of every row currently in
@@ -306,10 +333,13 @@ function rebuildHoursPivot(ss) {
 
   caregivers.forEach(function (caregiver, rIdx) {
     dates.forEach(function (date, cIdx) {
-      var color = resolved[rIdx][cIdx].color;
+      var r = resolved[rIdx][cIdx];
       var range = hoursSheet.getRange(rIdx + 3, cIdx + 2);
-      if (color) {
-        range.setBackground(color);
+      if (r.color) {
+        range.setBackground(r.color);
+      }
+      if (r.fontColor) {
+        range.setFontColor(r.fontColor);
       }
       var cell = cellMap[caregiver + '|' + date];
       if (cell && cell.timeDetails.length > 0) {

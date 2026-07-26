@@ -61,18 +61,22 @@ that same view, send the downloaded file back to a Claude Code session, and the 
    and click **Save**.
 7. Click **Scan Schedule** — two tabs get created in the Sheet automatically on first send:
    - `Shifts` — one row per shift (the raw detail: caregiver, client, date, times, status, note).
-   - `Hours` — caregiver names down the side, dates across the top. Each cell shows whatever's
-     relevant for that day's status, colored to match:
+   - `Hours` — caregiver names down the side, dates across the top. A cell with no shift at all
+     shows `-`. Otherwise it shows whatever's relevant for that day's status, colored to match:
      - **green** — completed, cell shows the computed decimal hours
      - **red** — incomplete (missing clock in/out), cell shows 0
      - **yellow** — ongoing (in progress), cell says "ongoing"
-     - **blue** — upcoming/scheduled, not yet happened
+     - **dark blue** — upcoming/scheduled, not yet happened
      - **orange** — cancelled by caregiver, cell shows the cancellation note (if WellSky exposed one)
      - **darker orange** — cancelled by the office, same note handling
-     - **sky blue** — cancelled by the client, cell shows 0 plus the note (if any)
+     - **sky blue** — cancelled by the client/family, cell shows 0 plus the note (if any)
 
      If a caregiver had more than one shift on the same day, the most urgent one wins the color
      (incomplete beats cancelled beats ongoing beats a plain completed total).
+
+   Computed hours are rounded to the nearest quarter hour per payroll's rounding table: 0-7
+   leftover minutes round down to `:00`, 8-22 → `:15`, 23-37 → `:30`, 38-52 → `:45`, 53-60 round up
+   to the next full hour (e.g. 2h17m → 2.25).
 
    Hover over any cell with a shift in it to see a tooltip with the actual clock times (e.g.
    "3:00 PM to 9:00 PM"), so you can double check the real punch times behind the decimal number
