@@ -412,7 +412,11 @@ function applyPendingWrites(sheet, pendingByBlockIndex) {
     });
 
     var range = sheet.getRange(minRow, minCol, maxRow - minRow + 1, maxCol - minCol + 1);
-    range.setNumberFormat('@');
+    // No setNumberFormat here: these date columns are part of a native
+    // Sheets Table with an explicit column type, and Sheets rejects
+    // overriding number format on cells inside a typed column outright
+    // ("You can't set the number format of cells in a typed column.") —
+    // the column's own type already governs how its values display.
 
     var values = range.getValues();
     var backgrounds = range.getBackgrounds();
