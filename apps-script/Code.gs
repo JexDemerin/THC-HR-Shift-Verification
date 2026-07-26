@@ -91,8 +91,8 @@ function doPost(e) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sheet = getOrCreateShiftsSheet(ss);
     upsertRecords(sheet, records);
-    rebuildHoursPivot(ss);
-    return jsonResponse({ ok: true, count: records.length });
+    var pivotSummary = rebuildHoursPivot(ss);
+    return jsonResponse({ ok: true, count: records.length, pivotSummary: pivotSummary });
   } catch (err) {
     return jsonResponse({ ok: false, error: err.message });
   } finally {
@@ -252,14 +252,27 @@ function formatDateHeader(isoDate) {
   return parseInt(parts[1], 10) + '/' + pad2(parseInt(parts[2], 10));
 }
 
-// Matches a date-header cell like "1/04" or "10/25" — not a full calendar
-// date, so this only ever appears in the header row of one of the tab's
-// date blocks.
+// Matches a date-header cell's displayed text like "1/04" or "10/25" — not a
+// full calendar date, so this only ever appears in the header row of one of
+// the tab's date blocks.
 var DATE_HEADER_PATTERN = /^\d{1,2}\/\d{2}$/;
 
-// A header row needs at least this many cells matching DATE_HEADER_PATTERN
-// to count as a real date-header row, rather than a coincidental match.
+// A header row needs at least this many cells resolving to a date key
+// (via headerCellDateKey) to count as a real date-header row, rather than a
+// coincidental match.
 var MIN_DATE_HEADER_CELLS = 5;
+
+// A header cell might be a real Date value formatted to display like "1/04"
+// rather than the plain text "1/04" itself — getValues() returns actual JS
+// Date objects for those, which DATE_HEADER_PATTERN would never match as a
+// string. Handle both so header detection works either way.
+function headerCellDateKey(cell) {
+  if (Object.prototype.toString.call(cell) === '[object Date]') {
+    return (cell.getMonth() + 1) + '/' + pad2(cell.getDate());
+  }
+  var text = String(cell).trim();
+  return DATE_HEADER_PATTERN.test(text) ? text : null;
+}
 
 // "Albulasi, Wesam" and "Wesam Albulasi" both normalize to the same key, so
 // caregiver names can be matched regardless of which order the sheet (or
@@ -288,11 +301,11 @@ function findDateHeaderRows(sheet) {
     var columnsByDate = {};
     var matches = 0;
     rowValues.forEach(function (cell, colIdx) {
-      var text = String(cell).trim();
-      if (DATE_HEADER_PATTERN.test(text)) {
+      var dateKey = headerCellDateKey(cell);
+      if (dateKey) {
         matches++;
-        if (!columnsByDate[text]) columnsByDate[text] = [];
-        columnsByDate[text].push(colIdx + 1); // 1-based column
+        if (!columnsByDate[dateKey]) columnsByDate[dateKey] = [];
+        columnsByDate[dateKey].push(colIdx + 1); // 1-based column
       }
     });
     if (matches >= MIN_DATE_HEADER_CELLS) {
@@ -331,14 +344,22 @@ function buildTimesheetIndex(sheet) {
 // Writes one resolved cell (value/color/fontColor/note) into every
 // existing (row, column) location across all of the tab's blocks whose
 // header already has this exact date and whose caregiver rows already
-// include this exact caregiver — does nothing if neither exists yet.
+// include this exact caregiver. Returns a status string so the caller can
+// tally and report back what actually happened, since this otherwise fails
+// silently by design (a shift with nowhere to go yet is expected, not an
+// error) — 'written', 'no_date_match', or 'no_caregiver_match'.
 function writeResolvedCell(sheet, blocks, caregiverName, isoDate, resolved) {
   var dateKey = formatDateHeader(isoDate);
   var nameKey = normalizeName(caregiverName);
+  var wrote = false;
+  var sawDate = false;
+  var sawCaregiver = false;
 
   blocks.forEach(function (block) {
     var cols = block.columnsByDate[dateKey];
     var row = block.nameMap[nameKey];
+    if (cols) sawDate = true;
+    if (row) sawCaregiver = true;
     if (!cols || !row) return;
 
     cols.forEach(function (col) {
@@ -353,7 +374,12 @@ function writeResolvedCell(sheet, blocks, caregiverName, isoDate, resolved) {
         range.clearNote();
       }
     });
+    wrote = true;
   });
+
+  if (wrote) return 'written';
+  if (!sawDate) return 'no_date_match';
+  return 'no_caregiver_match';
 }
 
 // Picks what a single caregiver/date cell shows, when that day may have had
@@ -394,20 +420,32 @@ function resolveCell(cell) {
   return cellResult(cell.hoursSum, 'completed');
 }
 
+// Caps how many "here's an example of what got skipped" entries go back in
+// the scan response — enough to diagnose a problem without bloating it.
+var MAX_PIVOT_SAMPLES = 10;
+
 // Aggregates every row currently in "Shifts" by (caregiver, date) — a
 // caregiver can have more than one shift the same day (different clients),
 // and each one only ever has one cell to land in — then writes each
 // aggregated cell into the real timesheets tab, wherever a matching date
 // header + caregiver row already exists for it. Never clears or rebuilds
-// anything; a shift with nowhere to go yet is silently skipped.
+// anything; a shift with nowhere to go yet is skipped rather than
+// fabricated, but every skip is tallied into the returned summary (rather
+// than failing silently) so a scan can be diagnosed from its response
+// alone instead of having to guess why the sheet didn't change.
 function rebuildHoursPivot(ss) {
+  var summary = { headerBlocksFound: 0, cellsResolved: 0, written: 0, skippedNoDateMatch: [], skippedNoCaregiverMatch: [] };
+
   var shiftsSheet = ss.getSheetByName(SHEET_NAME);
-  if (!shiftsSheet) return;
+  if (!shiftsSheet) return summary;
   var lastRow = shiftsSheet.getLastRow();
-  if (lastRow < 2) return;
+  if (lastRow < 2) return summary;
 
   var timesheetSheet = ss.getSheetByName(TIMESHEETS_SHEET_NAME);
-  if (!timesheetSheet) return;
+  if (!timesheetSheet) {
+    summary.error = 'Timesheets tab "' + TIMESHEETS_SHEET_NAME + '" not found';
+    return summary;
+  }
 
   var data = shiftsSheet.getRange(2, 1, lastRow - 1, HEADERS.length).getValues();
 
@@ -439,13 +477,25 @@ function rebuildHoursPivot(ss) {
   });
 
   var blocks = buildTimesheetIndex(timesheetSheet);
+  summary.headerBlocksFound = blocks.length;
 
   Object.keys(cellMap).forEach(function (key) {
     var entry = cellMap[key];
     var resolved = resolveCell(entry);
     resolved.note = entry.shiftDetails.length > 0 ? entry.shiftDetails.join('\n') : null;
-    writeResolvedCell(timesheetSheet, blocks, entry.caregiver, entry.date, resolved);
+    summary.cellsResolved++;
+
+    var status = writeResolvedCell(timesheetSheet, blocks, entry.caregiver, entry.date, resolved);
+    if (status === 'written') {
+      summary.written++;
+    } else {
+      var sample = entry.caregiver + ' @ ' + entry.date;
+      var bucket = status === 'no_date_match' ? summary.skippedNoDateMatch : summary.skippedNoCaregiverMatch;
+      if (bucket.length < MAX_PIVOT_SAMPLES) bucket.push(sample);
+    }
   });
+
+  return summary;
 }
 
 function jsonResponse(obj) {

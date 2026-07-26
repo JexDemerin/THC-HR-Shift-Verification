@@ -135,11 +135,16 @@ async function scanSchedule() {
       records,
     });
 
-    if (response && response.ok) {
+    // response.ok is just the background worker's fetch succeeding — Apps
+    // Script always answers with HTTP 200 even when its own code threw, so
+    // the real pass/fail lives one level down in result.ok.
+    const sheetResult = response && response.result;
+    if (response && response.ok && sheetResult && sheetResult.ok) {
       setStatus(parts.join(' — ') + ' — sent to sheet.');
       addLogEntry('Sent to Google Sheet successfully.');
+      logPivotSummary(sheetResult.pivotSummary);
     } else {
-      const errorMessage = (response && response.error) || 'unknown error';
+      const errorMessage = (sheetResult && sheetResult.error) || (response && response.error) || 'unknown error';
       setStatus(parts.join(' — ') + ` — send failed: ${errorMessage}`);
       addLogEntry(`Send to sheet failed: ${errorMessage}`);
     }
@@ -147,6 +152,32 @@ async function scanSchedule() {
     setStatus(`Error: ${err.message}`);
   } finally {
     scanBtn.disabled = false;
+  }
+}
+
+// Surfaces what the Sheet-side script's timesheet lookup actually did, since
+// a "sent successfully" HTTP response says nothing about whether any cells
+// in the real timesheets tab were found and written — this is the only way
+// to tell a shift landed vs. got silently skipped (no matching date column
+// or caregiver row yet) without opening the sheet itself.
+function logPivotSummary(summary) {
+  if (!summary) return;
+
+  if (summary.error) {
+    addLogEntry(`Timesheet lookup error: ${summary.error}`);
+    return;
+  }
+
+  addLogEntry(
+    `Timesheet: ${summary.headerBlocksFound} date block(s) found in the sheet, ` +
+      `${summary.written}/${summary.cellsResolved} cell(s) written.`
+  );
+
+  if (summary.skippedNoDateMatch && summary.skippedNoDateMatch.length > 0) {
+    addLogEntry(`No matching date column yet for: ${summary.skippedNoDateMatch.join(', ')}`);
+  }
+  if (summary.skippedNoCaregiverMatch && summary.skippedNoCaregiverMatch.length > 0) {
+    addLogEntry(`No matching caregiver row for: ${summary.skippedNoCaregiverMatch.join(', ')}`);
   }
 }
 
