@@ -7,10 +7,11 @@
 // Writes two tabs:
 // - "Shifts": one row per shift, the raw scanned detail (audit trail).
 // - "Hours": a pivot built from "Shifts" — caregiver names down the side,
-//   dates across the top, decimal hours worked in each cell. A cell is
-//   colored when that caregiver had an incomplete (missing clock in/out)
-//   shift that day, so it's visible at a glance which day/caregiver needs
-//   follow-up, without a separate report.
+//   dates across the top. Each cell is colored by that day's shift status
+//   and shows whatever's relevant for that status (see resolveCell below):
+//   completed hours as a decimal, "ongoing" for in-progress shifts, 0 for
+//   incomplete (missing clock in/out), or the cancellation note for a
+//   cancelled shift. This is HR's working view — no separate report needed.
 
 var SHEET_NAME = 'Shifts';
 var HOURS_SHEET_NAME = 'Hours';
@@ -23,18 +24,28 @@ var HEADERS = [
   'time_out',
   'status',
   'status_raw',
+  'note',
   'event_id',
   'scanned_at',
 ];
 
 var STATUS_COLORS = {
-  incomplete: '#f8d7da',
-  unparsed: '#fff3cd',
-  completed: '#d4edda',
-  upcoming: '#d1ecf1',
-  ongoing: '#fff8b3',
-  cancelled: '#e2e3e5',
+  completed: '#d4edda', // green — real hours computed
+  incomplete: '#f8d7da', // red — missing clock in/out
+  upcoming: '#d1ecf1', // blue — scheduled, hasn't happened yet
+  ongoing: '#fff9b0', // yellow — in progress
+  unparsed: '#fff3cd', // unrecognized status token, needs a look
+  cancelled_by_caregiver: '#ffe0b2', // orange
+  cancelled_by_office: '#ffb74d', // darker orange
+  cancelled_by_client: '#81d4fa', // sky blue
 };
+
+// Priority order used to pick ONE color/value for a cell when a caregiver
+// had more than one shift on the same day with different statuses —
+// whichever needs the most attention wins. Cancellation reasons are checked
+// in this order too, in case more than one applies (rare, but shifts can
+// stack on one day).
+var CANCELLED_STATUSES = ['cancelled_by_caregiver', 'cancelled_by_office', 'cancelled_by_client'];
 
 var WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -67,6 +78,15 @@ function getOrCreateShiftsSheet(ss) {
   }
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(HEADERS);
+  } else {
+    // Sheet already exists from before a HEADERS column was added (e.g.
+    // "note") — extend the header row rather than losing existing data.
+    var existingCols = sheet.getLastColumn();
+    if (existingCols < HEADERS.length) {
+      sheet
+        .getRange(1, existingCols + 1, 1, HEADERS.length - existingCols)
+        .setValues([HEADERS.slice(existingCols)]);
+    }
   }
   return sheet;
 }
@@ -159,11 +179,44 @@ function getWeekdayName(isoDate) {
   return WEEKDAY_NAMES[d.getDay()];
 }
 
+// Picks what a single caregiver/date cell shows, when that day may have had
+// more than one shift with different statuses. Whichever needs the most
+// attention wins the color and the displayed value:
+//   incomplete  > cancelled (whichever reason)  > ongoing  > unparsed
+//   > upcoming  > completed (fall-through: just the computed hours)
+function resolveCell(cell) {
+  if (!cell || !cell.hasData) return { value: '', color: null };
+
+  if (cell.statuses.incomplete) {
+    return { value: cell.hoursSum, color: STATUS_COLORS.incomplete };
+  }
+
+  for (var i = 0; i < CANCELLED_STATUSES.length; i++) {
+    var s = CANCELLED_STATUSES[i];
+    if (cell.statuses[s]) {
+      return { value: cell.notes.join('; '), color: STATUS_COLORS[s] };
+    }
+  }
+
+  if (cell.statuses.ongoing) {
+    return { value: 'ongoing', color: STATUS_COLORS.ongoing };
+  }
+
+  if (cell.statuses.unparsed) {
+    return { value: '', color: STATUS_COLORS.unparsed };
+  }
+
+  if (cell.statuses.upcoming) {
+    return { value: '', color: STATUS_COLORS.upcoming };
+  }
+
+  return { value: cell.hoursSum, color: STATUS_COLORS.completed };
+}
+
 // Rebuilds the "Hours" tab from scratch out of every row currently in
-// "Shifts": one row per caregiver, one column per date seen so far, cell
-// value is total decimal hours worked that day (summed if there were
-// multiple shifts), colored if any shift that day for that caregiver was
-// incomplete or unparsed.
+// "Shifts": one row per caregiver, one column per date seen so far. See
+// resolveCell for what each cell shows/is colored based on that day's
+// status(es).
 function rebuildHoursPivot(ss) {
   var shiftsSheet = ss.getSheetByName(SHEET_NAME);
   if (!shiftsSheet) return;
@@ -193,17 +246,17 @@ function rebuildHoursPivot(ss) {
     dateSet[date] = true;
 
     var key = caregiver + '|' + date;
-    if (!cellMap[key]) cellMap[key] = { hours: 0, hasData: false, flagStatus: null };
-    cellMap[key].hasData = true;
+    if (!cellMap[key]) cellMap[key] = { hoursSum: 0, hasData: false, statuses: {}, notes: [] };
+    var cell = cellMap[key];
+    cell.hasData = true;
+    cell.statuses[record.status] = true;
 
-    if (record.status === 'incomplete') {
-      cellMap[key].flagStatus = 'incomplete';
-    } else if (record.status === 'unparsed' && cellMap[key].flagStatus !== 'incomplete') {
-      cellMap[key].flagStatus = 'unparsed';
+    if (record.status === 'completed') {
+      var hours = computeHours(record.time_in, record.time_out);
+      if (hours !== null) cell.hoursSum += hours;
     }
 
-    var hours = computeHours(record.time_in, record.time_out);
-    if (hours !== null) cellMap[key].hours += hours;
+    if (record.note) cell.notes.push(record.note);
   });
 
   var caregivers = Object.keys(caregiverSet).sort();
@@ -219,11 +272,16 @@ function rebuildHoursPivot(ss) {
   headerRange.setFontWeight('bold');
 
   hoursSheet.getRange(3, 1, caregivers.length, 1).setNumberFormat('@');
-  var outputRows = caregivers.map(function (caregiver) {
+  var resolved = caregivers.map(function (caregiver) {
+    return dates.map(function (date) {
+      return resolveCell(cellMap[caregiver + '|' + date]);
+    });
+  });
+
+  var outputRows = caregivers.map(function (caregiver, rIdx) {
     return [caregiver].concat(
-      dates.map(function (date) {
-        var cell = cellMap[caregiver + '|' + date];
-        return cell && cell.hasData ? cell.hours : '';
+      resolved[rIdx].map(function (r) {
+        return r.value;
       })
     );
   });
@@ -231,11 +289,9 @@ function rebuildHoursPivot(ss) {
 
   caregivers.forEach(function (caregiver, rIdx) {
     dates.forEach(function (date, cIdx) {
-      var cell = cellMap[caregiver + '|' + date];
-      if (cell && cell.flagStatus) {
-        hoursSheet
-          .getRange(rIdx + 3, cIdx + 2)
-          .setBackground(STATUS_COLORS[cell.flagStatus]);
+      var color = resolved[rIdx][cIdx].color;
+      if (color) {
+        hoursSheet.getRange(rIdx + 3, cIdx + 2).setBackground(color);
       }
     });
   });

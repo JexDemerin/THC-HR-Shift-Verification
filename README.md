@@ -60,11 +60,19 @@ that same view, send the downloaded file back to a Claude Code session, and the 
 6. In the extension's popup, open **Settings**, paste the URL into "Google Sheet Web App URL",
    and click **Save**.
 7. Click **Scan Schedule** — two tabs get created in the Sheet automatically on first send:
-   - `Shifts` — one row per shift (the raw detail: caregiver, client, date, times, status).
-   - `Hours` — caregiver names down the side, dates across the top, total hours worked that day
-     in each cell (added up if there was more than one shift). A cell is colored if that
-     caregiver had an incomplete or unparsed shift that day, so it's obvious at a glance which
-     day/caregiver needs a manual look — no separate report needed.
+   - `Shifts` — one row per shift (the raw detail: caregiver, client, date, times, status, note).
+   - `Hours` — caregiver names down the side, dates across the top. Each cell shows whatever's
+     relevant for that day's status, colored to match:
+     - **green** — completed, cell shows the computed decimal hours
+     - **red** — incomplete (missing clock in/out), cell shows 0
+     - **yellow** — ongoing (in progress), cell says "ongoing"
+     - **blue** — upcoming/scheduled, not yet happened
+     - **orange** — cancelled by caregiver, cell shows the cancellation note (if WellSky exposed one)
+     - **darker orange** — cancelled by the office, same note handling
+     - **sky blue** — cancelled by the client, cell shows 0 plus the note (if any)
+
+     If a caregiver had more than one shift on the same day, the most urgent one wins the color
+     (incomplete beats cancelled beats ongoing beats a plain completed total).
 
 `Hours` is rebuilt from `Shifts` on every scan, so it always reflects everything scanned so far,
 across however many weeks you've scanned. If you edit anything in `Hours` by hand, it'll be
