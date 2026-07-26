@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "THC WellSky Shift Scanner",
-  "version": "0.1.0",
-  "description": "Phase 0: capture raw WellSky schedule markup on demand so we can build a real shift parser from real HTML.",
+  "version": "0.2.0",
+  "description": "Scans the visible WellSky schedule for incomplete shifts and sends them to a Google Sheet for payroll follow-up.",
   "action": {
     "default_popup": "popup.html"
   },
@@ -12,6 +12,10 @@
   "permissions": [
     "activeTab",
     "scripting",
-    "downloads"
+    "downloads",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
   ]
 }

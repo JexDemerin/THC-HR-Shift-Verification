@@ -75,22 +75,52 @@
       .log-entry:last-child {
         border-bottom: none;
       }
+      details {
+        margin-top: 4px;
+        font-size: 11px;
+      }
+      summary {
+        cursor: pointer;
+        color: #555;
+      }
+      details label {
+        display: block;
+        margin-top: 8px;
+        margin-bottom: 3px;
+        color: #555;
+      }
+      details input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 5px 6px;
+        font-size: 11px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        margin-bottom: 6px;
+      }
+      details button {
+        margin-bottom: 0;
+      }
     </style>
   </head>
   <body>
     <h1>WellSky Shift Scanner</h1>
     <p class="subtitle">Together Homecare — payroll follow-up tool</p>
 
-    <button id="exportBtn" class="primary">Export Raw HTML</button>
-    <span class="phase-tag">Phase 0 — DOM discovery tool</span>
+    <button id="scanBtn" class="primary">Scan Schedule</button>
 
-    <button id="scanBtn" disabled title="Coming in Phase 1, once real WellSky markup has been captured and the parser is built">
-      Scan Schedule
-    </button>
-    <span class="phase-tag">Phase 1+ — not yet implemented</span>
+    <button id="exportBtn">Export Raw HTML</button>
+    <span class="phase-tag">DOM debugging tool — use if a new shift status shows up as "unparsed"</span>
 
     <div id="status">Ready.</div>
     <div id="log"></div>
+
+    <details id="settings">
+      <summary>Settings</summary>
+      <label for="webhookUrl">Google Sheet Web App URL</label>
+      <input type="text" id="webhookUrl" placeholder="https://script.google.com/macros/s/.../exec" />
+      <button id="saveWebhookBtn">Save</button>
+    </details>
 
     <script src="popup.js"></script>
   </body>
