@@ -99,13 +99,17 @@ function upsertRecords(sheet, records) {
     });
 
     var rowNum = keyToRow[key];
-    if (rowNum) {
-      sheet.getRange(rowNum, 1, 1, numCols).setValues([values]);
-    } else {
-      sheet.appendRow(values);
-      rowNum = sheet.getLastRow();
+    if (!rowNum) {
+      lastRow += 1;
+      rowNum = lastRow;
       keyToRow[key] = rowNum;
     }
+    // Force plain text so Sheets doesn't "helpfully" auto-convert
+    // shift_date/time_in/time_out into real dates/times, which would
+    // silently break the string parsing the Hours pivot depends on.
+    var range = sheet.getRange(rowNum, 1, 1, numCols);
+    range.setNumberFormat('@');
+    range.setValues([values]);
     applyStatusFormatting(sheet, rowNum, numCols, record.status);
   });
 }
@@ -208,10 +212,13 @@ function rebuildHoursPivot(ss) {
 
   var dateHeaderRow = [''].concat(dates.map(formatDateHeader));
   var weekdayHeaderRow = [''].concat(dates.map(getWeekdayName));
+  var headerRange = hoursSheet.getRange(1, 1, 2, dateHeaderRow.length);
+  headerRange.setNumberFormat('@'); // keep "7/25" as text, not an auto-converted date
   hoursSheet.getRange(1, 1, 1, dateHeaderRow.length).setValues([dateHeaderRow]);
   hoursSheet.getRange(2, 1, 1, weekdayHeaderRow.length).setValues([weekdayHeaderRow]);
-  hoursSheet.getRange(1, 1, 2, dateHeaderRow.length).setFontWeight('bold');
+  headerRange.setFontWeight('bold');
 
+  hoursSheet.getRange(3, 1, caregivers.length, 1).setNumberFormat('@');
   var outputRows = caregivers.map(function (caregiver) {
     return [caregiver].concat(
       dates.map(function (date) {
