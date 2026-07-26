@@ -59,8 +59,16 @@ that same view, send the downloaded file back to a Claude Code session, and the 
 5. Click **Deploy**, authorize it when prompted, and copy the Web App URL it gives you.
 6. In the extension's popup, open **Settings**, paste the URL into "Google Sheet Web App URL",
    and click **Save**.
-7. Click **Scan Schedule** — a `Shifts` tab will be created in the Sheet automatically on first
-   send, with the right column headers.
+7. Click **Scan Schedule** — two tabs get created in the Sheet automatically on first send:
+   - `Shifts` — one row per shift (the raw detail: caregiver, client, date, times, status).
+   - `Hours` — caregiver names down the side, dates across the top, total hours worked that day
+     in each cell (added up if there was more than one shift). A cell is colored if that
+     caregiver had an incomplete or unparsed shift that day, so it's obvious at a glance which
+     day/caregiver needs a manual look — no separate report needed.
+
+`Hours` is rebuilt from `Shifts` on every scan, so it always reflects everything scanned so far,
+across however many weeks you've scanned. If you edit anything in `Hours` by hand, it'll be
+overwritten on the next scan — `Shifts` is the source of truth.
 
 The extension is pre-authorized to talk to `script.google.com` (where every Apps Script Web App
 URL lives), so saving the URL doesn't trigger any extra Chrome permission prompt. If you switch
